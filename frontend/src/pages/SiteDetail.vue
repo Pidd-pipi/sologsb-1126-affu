@@ -9,15 +9,16 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import MapPanel from '@/components/common/MapPanel.vue'
 import FactorScoreBar from '@/components/common/FactorScoreBar.vue'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import GateTags from '@/components/common/GateTags.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { FACTOR_META, NORMALIZE_LABELS } from '@/types/score'
+import { FACTOR_META, NORMALIZE_LABELS, normalizeGates } from '@/types/score'
 import { ASPECT_TYPES, SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import type { AspectType, AccessMode, SurfaceType } from '@/types/campsite'
-import type { Grade } from '@/utils/score'
+import type { Grade, GateFail } from '@/utils/score'
 import type { RockfallRisk, WindDir, WindForce } from '@/types/factor'
 import { ROCKFALL_RISKS, WIND_DIRS, WIND_FORCES } from '@/types/factor'
 import { VETO_TYPES, VETO_HINTS } from '@/types/veto'
@@ -37,9 +38,10 @@ const site = computed(() => siteStore.byId(siteId.value))
 const { scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => uiStore.workingWeights,
+  normalize: () => uiStore.workingNormalize,
+  thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -49,6 +51,12 @@ const scoreRow = computed(() => scoreOf(siteId.value))
 function gradeOfSite(id: number): Grade {
   return scoreOf(id)?.grade ?? 'C'
 }
+
+function gateFailsOf(id: number): GateFail[] {
+  return scoreOf(id)?.gateFails ?? []
+}
+
+const activeGates = computed(() => normalizeGates(uiStore.workingGates))
 
 function openSite(id: number): void {
   void router.push(`/sites/${id}`)
@@ -259,10 +267,24 @@ watch(
       :description="vetoList.map((v) => `${v.type}：${v.description}`).join(' ｜ ')"
     />
 
+    <el-alert
+      v-if="scoreRow && scoreRow.gateFails.length"
+      :type="scoreRow.gateFails.length >= 2 ? 'error' : 'warning'"
+      show-icon
+      :closable="false"
+      :title="
+        scoreRow.gateFails.length >= 2
+          ? `硬门槛有 ${scoreRow.gateFails.length} 项不达标，直接评 C`
+          : '硬门槛有 1 项不达标，即使总分够也最高只能评 B'
+      "
+      :description="scoreRow.gateFails.map((f) => f.message).join('；')"
+    />
+
     <MapPanel
       :sites="siteStore.list"
       :selected-id="siteId"
       :grade-of="gradeOfSite"
+      :gate-fails-of="gateFailsOf"
       height="360px"
       :title="`营位定位 · ${site.code}`"
       @select="openSite"
@@ -277,9 +299,20 @@ watch(
       <div class="stat-card">
         <div class="stat-card__label">推荐等级</div>
         <div class="stat-card__value">
-          <GradeBadge :grade="grade" size="large" :vetoed="vetoList.length > 0" />
+          <GradeBadge
+            :grade="grade"
+            size="large"
+            :vetoed="vetoList.length > 0"
+            :show-label="false"
+            :gate-fails="scoreRow?.gateFails ?? []"
+          />
         </div>
-        <div class="stat-card__extra">名次第 {{ scoreRow?.rank ?? '—' }} 位</div>
+        <div class="stat-card__extra">
+          名次第 {{ scoreRow?.rank ?? '—' }} 位
+          <div class="detail-gates">
+            <GateTags :fails="scoreRow?.gateFails ?? []" size="small" />
+          </div>
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">坐标</div>
@@ -380,6 +413,9 @@ watch(
           归一方式：{{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
           · 等级阈值 A ≥ {{ profileStore.activeProfile?.thresholds.gradeA ?? 78 }} / B ≥
           {{ profileStore.activeProfile?.thresholds.gradeB ?? 58 }}
+          <br />
+          硬门槛：坡度 ≤ {{ activeGates.maxSlope }}° · 信号 ≥ {{ activeGates.minSignal }} 格 · 水源 ≤
+          {{ activeGates.maxWaterDistance }} m（任一不达标最高 B，两项以上评 C）
         </span>
       </div>
       <div class="factor-grid">
@@ -643,6 +679,9 @@ watch(
 }
 .coord {
   font-size: 15px;
+}
+.detail-gates {
+  margin-top: 6px;
 }
 .review-form {
   margin-bottom: 12px;

@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { FactorWeights, ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, normalizeGates } from '@/types/score'
 import { nowIso } from '@/utils/format'
 
 export const useProfileStore = defineStore('profile', () => {
@@ -19,6 +19,9 @@ export const useProfileStore = defineStore('profile', () => {
     ...DEFAULT_WEIGHTS,
     ...(activeProfile.value?.weights ?? {})
   }))
+
+  /** 当前启用方案的硬门槛；方案缺字段时也能兜底（旧数据） */
+  const activeGates = computed(() => normalizeGates(activeProfile.value?.gates))
 
   async function load(): Promise<void> {
     loading.value = true
@@ -36,6 +39,7 @@ export const useProfileStore = defineStore('profile', () => {
       ...input,
       weights: { ...DEFAULT_WEIGHTS, ...input.weights },
       thresholds: { ...input.thresholds },
+      gates: normalizeGates(input.gates),
       createdAt: now,
       updatedAt: now
     }) as ScoreProfile
@@ -58,6 +62,7 @@ export const useProfileStore = defineStore('profile', () => {
       weights: { ...DEFAULT_WEIGHTS, ...(src?.weights ?? {}) },
       normalize: src?.normalize ?? 'minmax',
       thresholds: { ...(src?.thresholds ?? { gradeA: 78, gradeB: 58 }) },
+      gates: normalizeGates(src?.gates),
       season: season ?? src?.season ?? '四季通用',
       active: false,
       note: src?.note ? `由「${src.name}」复制：${src.note}` : `由「${src?.name ?? '默认方案'}」复制`,
@@ -98,6 +103,7 @@ export const useProfileStore = defineStore('profile', () => {
     total,
     activeProfile,
     activeWeights,
+    activeGates,
     load,
     createProfile,
     updateProfile,

@@ -3,8 +3,9 @@
  * 应用外壳：顶部导航 + 全局统计 + 页脚存储说明。
  * 挂载时并行加载四张表（sites / factors / profiles / vetos），保证各页面首屏即有数据。
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
@@ -27,6 +28,22 @@ const activeMenu = computed(() => {
 
 const mapModeText = computed(() =>
   resolveAmapKey() ? '高德地图模式' : 'SVG 网格降级模式（未配置 VITE_AMAP_KEY）'
+)
+
+/**
+ * 启用方案变化（首次加载 / 启用其他方案）时，把该方案保存的权重、归一方式、
+ * 等级阈值与硬门槛同步到 uiStore 工作区：
+ * 名次表、地图在评分页之外也采用同一份（含未保存的临时调整）；
+ * 切回已保存方案时，门槛恢复为方案中保存的值。
+ */
+const { activeProfile } = storeToRefs(profileStore)
+watch(
+  activeProfile,
+  (p) => {
+    if (!p) return
+    uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season, p.gates)
+  },
+  { immediate: true }
 )
 
 onMounted(async () => {

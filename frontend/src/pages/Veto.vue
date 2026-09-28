@@ -7,6 +7,7 @@ import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import GateTags from '@/components/common/GateTags.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
@@ -23,9 +24,10 @@ const uiStore = useUiStore()
 const { scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => uiStore.workingWeights,
+  normalize: () => uiStore.workingNormalize,
+  thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -229,6 +231,7 @@ function focusSite(id: number | undefined): void {
             :grade="selectedRow.grade"
             :score="selectedRow.total"
             :vetoed="selectedVetos.length > 0"
+            :gate-fails="selectedRow.gateFails"
           />
         </div>
         <template v-if="selectedSite">
@@ -252,6 +255,10 @@ function focusSite(id: number | undefined): void {
             <div class="preview-item">
               <span>现有否决</span>
               <strong>{{ selectedVetos.length }} 条</strong>
+            </div>
+            <div v-if="selectedRow" class="preview-item">
+              <span>硬门槛</span>
+              <GateTags :fails="selectedRow.gateFails" size="small" :show-ok="false" />
             </div>
           </div>
           <div v-if="selectedVetos.length" class="preview-veto">

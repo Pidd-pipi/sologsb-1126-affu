@@ -8,10 +8,11 @@
 import { computed, effectScope, type ComputedRef } from 'vue'
 import type { Campsite } from '@/types/campsite'
 import type { FactorAssessment } from '@/types/factor'
-import type { FactorKey, FactorWeights, GradeThresholds, NormalizeMethod } from '@/types/score'
+import type { FactorKey, FactorWeights, GradeThresholds, HardGates, NormalizeMethod } from '@/types/score'
 import {
   buildFactorRows,
   buildNormalizedMatrix,
+  checkGates,
   gradeOf,
   rawValuesOf,
   weightedTotal,
@@ -28,6 +29,8 @@ export interface RankingInput {
   weights: () => FactorWeights
   normalize: () => NormalizeMethod
   thresholds: () => GradeThresholds
+  /** 当前方案的硬门槛（坡度上限 / 信号下限 / 水源距离上限） */
+  gates: () => HardGates
   /** 命中否决项的营位 id 集合 */
   vetoedIds: () => number[]
 }
@@ -56,6 +59,7 @@ export function useRanking(input: RankingInput): RankingState {
       const normalize = input.normalize()
       const weights = input.weights()
       const thresholds = input.thresholds()
+      const gates = input.gates()
       const vetoSet = new Set(input.vetoedIds() ?? [])
 
       const list = sites.filter((s): s is Campsite & { id: number } => typeof s.id === 'number')
@@ -73,14 +77,16 @@ export function useRanking(input: RankingInput): RankingState {
         const raw = entries[idx].values
         const normalized = matrix.get(siteId) ?? ({} as Record<FactorKey, number>)
         const vetoed = vetoSet.has(siteId)
+        const gateFails = checkGates(raw, gates)
         const total = weightedTotal(normalized, weights)
         return {
           site,
           siteId,
           total,
-          grade: gradeOf(total, thresholds, vetoed),
+          grade: gradeOf(total, thresholds, vetoed, gateFails.length),
           vetoed,
           vetoTypes: [],
+          gateFails,
           rows: buildFactorRows(normalized, weights).map((row) => ({ ...row, raw: raw[row.key] })),
           raw,
           rank: 0

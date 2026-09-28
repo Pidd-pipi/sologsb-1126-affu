@@ -6,8 +6,8 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { RiskVeto } from '@/types/veto'
-import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import type { FactorWeights, NormalizeMethod, GradeThresholds, HardGates } from '@/types/score'
+import { DEFAULT_WEIGHTS, DEFAULT_GATES, normalizeGates } from '@/types/score'
 import type { AccessMode, SurfaceType } from '@/types/campsite'
 import { nowIso, todayIso } from '@/utils/format'
 
@@ -25,6 +25,8 @@ export const useUiStore = defineStore('ui', () => {
   const workingWeights = ref<FactorWeights>({ ...DEFAULT_WEIGHTS })
   const workingNormalize = ref<NormalizeMethod>('minmax')
   const workingThresholds = ref<GradeThresholds>({ gradeA: 78, gradeB: 58 })
+  /** 临时硬门槛：改这里，名次、等级与地图颜色立即变；切回已保存方案时恢复 */
+  const workingGates = ref<HardGates>({ ...DEFAULT_GATES })
   const workingSeason = ref<string>('四季通用')
   const dirty = ref(false)
 
@@ -74,16 +76,18 @@ export const useUiStore = defineStore('ui', () => {
     Array.from(new Set(vetos.value.map((v) => v.siteId)))
   )
 
-  /** 用启用方案覆盖临时权重。 */
+  /** 用启用方案覆盖临时权重与门槛（切换/恢复已保存方案时调用）。 */
   function syncFromProfile(
     weights: FactorWeights,
     normalize: NormalizeMethod,
     thresholds: GradeThresholds,
-    season: string
+    season: string,
+    gates?: HardGates
   ): void {
     workingWeights.value = { ...DEFAULT_WEIGHTS, ...weights }
     workingNormalize.value = normalize
     workingThresholds.value = { ...thresholds }
+    workingGates.value = normalizeGates(gates)
     workingSeason.value = season
     dirty.value = false
   }
@@ -93,6 +97,12 @@ export const useUiStore = defineStore('ui', () => {
     filterSurface.value = ''
     filterAccess.value = ''
     keyword.value = ''
+  }
+
+  /** 临时调整某项硬门槛（立即重算名次、等级与地图颜色，不落库）。 */
+  function patchWorkingGates(patch: Partial<HardGates>): void {
+    workingGates.value = { ...workingGates.value, ...patch }
+    dirty.value = true
   }
 
   const vetoTotal = computed(() => vetos.value.length)
@@ -108,6 +118,7 @@ export const useUiStore = defineStore('ui', () => {
     workingWeights,
     workingNormalize,
     workingThresholds,
+    workingGates,
     workingSeason,
     dirty,
     focusedSiteId,
@@ -118,6 +129,7 @@ export const useUiStore = defineStore('ui', () => {
     vetosOf,
     isVetoed,
     syncFromProfile,
+    patchWorkingGates,
     resetFilters
   }
 })

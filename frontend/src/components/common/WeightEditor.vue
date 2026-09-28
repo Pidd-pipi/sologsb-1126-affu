@@ -14,7 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'change', weights: FactorWeights): void
-  (e: 'preset', weights: FactorWeights): void
+  (e: 'preset', weights: FactorWeights, name?: string): void
 }>()
 
 const total = computed(() => weightSum(props.weights))

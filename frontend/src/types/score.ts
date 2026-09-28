@@ -29,6 +29,21 @@ export interface GradeThresholds {
   gradeB: number
 }
 
+/**
+ * 硬门槛（一票限制，与权重解耦）：
+ * 坡度超过上限 / 信号低于下限 / 水源距离超过上限即「不达标」。
+ * - 任一不达标：即使总分够，最高只能评 B
+ * - 两项及以上不达标：直接评 C
+ */
+export interface HardGates {
+  /** 坡度上限（度），site.slope > maxSlope 即不达标 */
+  maxSlope: number
+  /** 信号下限（格），signalBars < minSignal 即不达标 */
+  minSignal: number
+  /** 水源距离上限（米），waterDistance > maxWaterDistance 即不达标 */
+  maxWaterDistance: number
+}
+
 export interface ScoreProfile {
   /** 主键，自增 */
   id?: number
@@ -40,6 +55,8 @@ export interface ScoreProfile {
   normalize: NormalizeMethod
   /** 等级阈值 A/B/C */
   thresholds: GradeThresholds
+  /** 硬门槛：坡度上限、信号下限、水源距离上限 */
+  gates: HardGates
   /** 适用季节 */
   season: string
   /** 是否为当前启用方案 */
@@ -113,6 +130,61 @@ export const DEFAULT_WEIGHTS: FactorWeights = {
   distanceToCar: 8,
   distanceToTrail: 6
 }
+
+/** 硬门槛缺省值（旧方案升级时回填，保证老数据仍可直接使用） */
+export const DEFAULT_GATES: HardGates = {
+  maxSlope: 10,
+  minSignal: 2,
+  maxWaterDistance: 300
+}
+
+/** 把任意输入规整为合法的 HardGates：缺失字段回填缺省值，非法值兜底。 */
+export function normalizeGates(input?: Partial<HardGates> | null): HardGates {
+  const g = input ?? {}
+  const num = (v: unknown, fallback: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : fallback
+  }
+  return {
+    maxSlope: num(g.maxSlope, DEFAULT_GATES.maxSlope),
+    minSignal: num(g.minSignal, DEFAULT_GATES.minSignal),
+    maxWaterDistance: num(g.maxWaterDistance, DEFAULT_GATES.maxWaterDistance)
+  }
+}
+
+/**
+ * 场景硬门槛预设：亲子 / 雨季 / 重装三套，与权重预设配套使用。
+ * - family 亲子：坡要缓、信号要稳、水源不能太远
+ * - typhoon 雨季：放宽水源距离上限（远水更安全），坡度仍从严
+ * - wild 重装：接受陡坡与弱信号，但补给距离不能失控
+ */
+export const GATE_PRESETS: Record<string, HardGates> = {
+  balanced: { ...DEFAULT_GATES },
+  family: { maxSlope: 6, minSignal: 3, maxWaterDistance: 200 },
+  typhoon: { maxSlope: 8, minSignal: 2, maxWaterDistance: 250 },
+  wild: { maxSlope: 15, minSignal: 1, maxWaterDistance: 500 }
+}
+
+/** 取场景门槛预设；未命中时回落到均衡型。返回副本。 */
+export function gatePreset(name: string): HardGates {
+  return { ...(GATE_PRESETS[name] ?? DEFAULT_GATES) }
+}
+
+/** 硬门槛三项的展示元数据（名称 / 单位 / 不达标时的说明模板） */
+export interface GateMeta {
+  key: keyof HardGates
+  label: string
+  unit: string
+  /** 判定方向：lte 表示实测值需 ≤ 门槛，gte 表示实测值需 ≥ 门槛 */
+  rule: 'lte' | 'gte'
+  hint: string
+}
+
+export const GATE_META: GateMeta[] = [
+  { key: 'maxSlope', label: '坡度上限', unit: '°', rule: 'lte', hint: '坡度过陡' },
+  { key: 'minSignal', label: '信号下限', unit: '格', rule: 'gte', hint: '信号过弱' },
+  { key: 'maxWaterDistance', label: '水源距离上限', unit: 'm', rule: 'lte', hint: '离水源过远' }
+]
 
 export const SEASONS: string[] = ['春季', '夏季', '秋季', '冬季', '四季通用']
 

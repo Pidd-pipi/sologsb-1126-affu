@@ -1,21 +1,22 @@
 /**
  * IndexedDB（Dexie）封装：库结构、版本号与升级迁移、首次运行的样例营地数据。
  *
- * 版本演进（与提示词一致）：
+ * 版本演进：
  *   v1 建 sites / factors 两张表
  *   v2 新增 profiles 表，并为 factors 补 siteId 索引
  *   v3 新增 vetos 表，并为存量营位回填默认权重方案
+ *   v4 为权重方案补「硬门槛」（坡度上限 / 信号下限 / 水源距离上限），旧方案回填缺省门槛
  */
 import Dexie, { type Table } from 'dexie'
 import type { Campsite } from '@/types/campsite'
 import type { FactorAssessment } from '@/types/factor'
 import type { ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, DEFAULT_GATES, normalizeGates } from '@/types/score'
 import type { RiskVeto } from '@/types/veto'
 
 export const DB_NAME = 'gbcampsite-db'
 /** 当前数据结构版本号 */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 
 export class GbCampsiteDatabase extends Dexie {
   sites!: Table<Campsite, number>
@@ -74,6 +75,24 @@ export class GbCampsiteDatabase extends Dexie {
             if (typeof s.tentCapacity !== 'number') s.tentCapacity = 1
           })
       })
+
+    // v4：权重方案增加硬门槛（坡度上限 / 信号下限 / 水源距离上限）。
+    // 旧方案没有 gates 字段，统一回填缺省门槛，升级后仍可直接使用。
+    this.version(DB_VERSION)
+      .stores({
+        sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
+        factors: '++id, siteId, assessedAt, assessor',
+        profiles: '++id, name, season, active, updatedAt',
+        vetos: '++id, siteId, type, judgedAt'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('profiles')
+          .toCollection()
+          .modify((p: Partial<ScoreProfile>) => {
+            p.gates = normalizeGates(p.gates)
+          })
+      })
   }
 }
 
@@ -102,6 +121,7 @@ function seedProfiles(): ScoreProfile[] {
       weights: { ...DEFAULT_WEIGHTS },
       normalize: 'minmax',
       thresholds: { gradeA: 78, gradeB: 58 },
+      gates: { ...DEFAULT_GATES },
       season: '四季通用',
       active: true,
       note: '默认方案，坡度、水源、落石三项权重略高，适用于大多数山谷营地。',
@@ -126,9 +146,60 @@ function seedProfiles(): ScoreProfile[] {
       },
       normalize: 'threshold',
       thresholds: { gradeA: 82, gradeB: 62 },
+      gates: { maxSlope: 8, minSignal: 2, maxWaterDistance: 250 },
       season: '夏季',
       active: false,
       note: '雨季强调风力遮蔽与水系距离，阈值分段避免极差归一被单个离群营位拉偏。',
+      createdAt: SEED_TS,
+      updatedAt: SEED_TS
+    },
+    {
+      id: 3,
+      name: '亲子舒适方案',
+      weights: {
+        slope: 12,
+        flatness: 16,
+        aspect: 6,
+        waterDistance: 16,
+        wind: 6,
+        signal: 12,
+        sun: 8,
+        rockfall: 10,
+        shade: 6,
+        distanceToCar: 6,
+        distanceToTrail: 2
+      },
+      normalize: 'threshold',
+      thresholds: { gradeA: 80, gradeB: 60 },
+      gates: { maxSlope: 6, minSignal: 3, maxWaterDistance: 200 },
+      season: '春季',
+      active: false,
+      note: '亲子出行门槛从严：坡要缓、信号要稳、水源步行不超过 200 米，卡任一项最高只评 B。',
+      createdAt: SEED_TS,
+      updatedAt: SEED_TS
+    },
+    {
+      id: 4,
+      name: '重装野营方案',
+      weights: {
+        slope: 8,
+        flatness: 6,
+        aspect: 10,
+        waterDistance: 14,
+        wind: 12,
+        signal: 2,
+        sun: 10,
+        rockfall: 12,
+        shade: 10,
+        distanceToCar: 8,
+        distanceToTrail: 8
+      },
+      normalize: 'threshold',
+      thresholds: { gradeA: 76, gradeB: 55 },
+      gates: { maxSlope: 15, minSignal: 1, maxWaterDistance: 500 },
+      season: '秋季',
+      active: false,
+      note: '重装队伍可接受陡坡与弱信号，但水源距离仍设上限，两项以上不达标直接评 C。',
       createdAt: SEED_TS,
       updatedAt: SEED_TS
     }

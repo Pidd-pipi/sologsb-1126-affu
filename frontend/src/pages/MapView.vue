@@ -13,7 +13,9 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import type { Grade } from '@/utils/score'
+import type { Grade, GateFail } from '@/utils/score'
+import GateTags from '@/components/common/GateTags.vue'
+import { normalizeGates } from '@/types/score'
 import { useAmapLoader } from '@/hooks/useAmapLoader'
 import { SURFACE_TYPES } from '@/types/campsite'
 import { formatLat, formatLng, distanceMeters, formatDistance } from '@/utils/geo'
@@ -43,9 +45,10 @@ const visibleSites = computed(() =>
 const { ranked, scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => uiStore.workingWeights,
+  normalize: () => uiStore.workingNormalize,
+  thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -91,6 +94,14 @@ function gradeOfSite(id: number): Grade {
   return scoreOf(id)?.grade ?? 'C'
 }
 
+/** 供地图标记叠加门槛警示（哪几项不达标） */
+function gateFailsOf(id: number): GateFail[] {
+  return scoreOf(id)?.gateFails ?? []
+}
+
+const activeGates = computed(() => normalizeGates(uiStore.workingGates))
+const gateBlockedCount = computed(() => ranked.value.filter((r) => r.gateFails.length > 0).length)
+
 function selectSite(id: number): void {
   selectedId.value = id
   uiStore.focusedSiteId = id
@@ -113,6 +124,7 @@ const gradeStats = computed(() => {
         <h1>营位地图</h1>
         <p>
           按推荐等级给营位标记着色，命中风险否决项的营位以红点提示；
+          坡度、信号、水源硬门槛不达标会在标记上加警示角标并说明卡在哪几项。
           点击任一标记可查看该营位的得分构成、因子实测与否决记录。
         </p>
       </div>
@@ -143,6 +155,15 @@ const gradeStats = computed(() => {
         <div class="stat-card__label">{{ g.grade }} 级营位</div>
         <div class="stat-card__value" :style="{ color: g.color }">{{ g.count }}</div>
         <div class="stat-card__extra">共 {{ ranked.length }} 个候选营位</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__label">门槛受限</div>
+        <div class="stat-card__value" :style="{ color: gateBlockedCount ? '#d97706' : undefined }">
+          {{ gateBlockedCount }}
+        </div>
+        <div class="stat-card__extra">
+          坡度≤{{ activeGates.maxSlope }}° / 信号≥{{ activeGates.minSignal }}格 / 水源≤{{ activeGates.maxWaterDistance }}m
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">否决标记</div>
@@ -190,6 +211,7 @@ const gradeStats = computed(() => {
       :sites="panelSites"
       :selected-id="selectedId"
       :grade-of="gradeOfSite"
+      :gate-fails-of="gateFailsOf"
       height="460px"
       title="营位分布与等级着色"
       @select="selectSite"
@@ -213,6 +235,7 @@ const gradeStats = computed(() => {
           :grade="selectedRow?.grade ?? 'C'"
           :score="selectedRow?.total"
           :vetoed="selectedVetos.length > 0"
+          :gate-fails="selectedRow?.gateFails ?? []"
         />
       </div>
       <div class="detail-grid">
@@ -256,6 +279,9 @@ const gradeStats = computed(() => {
         </div>
       </div>
       <p v-if="selectedSite.note" class="panel__hint">现场备注：{{ selectedSite.note }}</p>
+      <div v-if="selectedRow && selectedRow.gateFails.length" class="veto-block">
+        <GateTags :fails="selectedRow.gateFails" />
+      </div>
       <div v-if="selectedVetos.length" class="veto-block">
         <el-tag v-for="v in selectedVetos" :key="v.id" type="danger" size="small" class="mr6">
           {{ v.type }}

@@ -6,8 +6,8 @@ import type { Campsite } from '@/types/campsite'
 import { ASPECT_SCORE } from '@/types/campsite'
 import type { FactorAssessment, RockfallRisk } from '@/types/factor'
 import { ROCKFALL_SCORE } from '@/types/factor'
-import type { FactorKey, FactorMeta, FactorWeights, GradeThresholds, NormalizeMethod } from '@/types/score'
-import { FACTOR_META } from '@/types/score'
+import type { FactorKey, FactorMeta, FactorWeights, GradeThresholds, HardGates, NormalizeMethod } from '@/types/score'
+import { FACTOR_META, GATE_META } from '@/types/score'
 
 /** 推荐等级 */
 export type Grade = 'A' | 'B' | 'C'
@@ -44,6 +44,24 @@ export interface FactorScoreRow {
   contribution: number
 }
 
+/** 单项硬门槛不达标明细，供名次表与地图逐项说明 */
+export interface GateFail {
+  /** 门槛字段名 */
+  key: keyof HardGates
+  /** 中文名，如「坡度上限」 */
+  label: string
+  /** 门槛值 */
+  limit: number
+  /** 营位实测值 */
+  actual: number
+  /** 单位 */
+  unit: string
+  /** 简短原因，如「坡度过陡」 */
+  reason: string
+  /** 完整说明，如「坡度 12.0° 超过上限 8°」 */
+  message: string
+}
+
 /** 一个营位的完整评分结果 */
 export interface SiteScore {
   siteId: number
@@ -52,6 +70,8 @@ export interface SiteScore {
   rows: FactorScoreRow[]
   vetoed: boolean
   vetoTypes: string[]
+  /** 未通过的硬门槛（顺序固定：坡度 / 信号 / 水源） */
+  gateFails: GateFail[]
 }
 
 export function clamp(value: number, min = 0, max = 100): number {
@@ -157,12 +177,48 @@ export function weightedTotal(normalized: Record<FactorKey, number>, weights: Fa
   return round1(sum / weightSum)
 }
 
-/** 等级阈值判定；命中否决项时最高只能评 B，短路为 C。 */
-export function gradeOf(total: number, thresholds: GradeThresholds, vetoed: boolean): Grade {
+/**
+ * 硬门槛判定：坡度超上限、信号低于下限、水源距离超上限，任一即记入失败明细。
+ * 规则与权重完全解耦，只看实测值与方案门槛。
+ */
+export function checkGates(raw: RawFactorValues, gates: HardGates): GateFail[] {
+  const fails: GateFail[] = []
+  const actualOf: Record<keyof HardGates, number> = {
+    maxSlope: raw.slope,
+    minSignal: raw.signal,
+    maxWaterDistance: raw.waterDistance
+  }
+  for (const meta of GATE_META) {
+    const actual = actualOf[meta.key]
+    const limit = gates[meta.key]
+    const bad = meta.rule === 'lte' ? actual > limit : actual < limit
+    if (!bad) continue
+    const actualText = formatGateActual(meta.key, actual)
+    const bound = meta.rule === 'lte' ? '上限' : '下限'
+    const message = `${meta.hint}：${actualText}（${bound} ${limit}${meta.unit}）`
+    fails.push({ key: meta.key, label: meta.label, limit, actual, unit: meta.unit, reason: meta.hint, message })
+  }
+  return fails
+}
+
+function formatGateActual(key: keyof HardGates, value: number): string {
+  if (key === 'maxSlope') return `坡度 ${value.toFixed(1)}°`
+  if (key === 'minSignal') return `信号 ${value} 格`
+  return `水源 ${value} m`
+}
+
+/** 等级阈值判定；命中否决项短路为 C；硬门槛 1 项不达标最高 B，2 项及以上直接 C。 */
+export function gradeOf(
+  total: number,
+  thresholds: GradeThresholds,
+  vetoed: boolean,
+  gateFailCount = 0
+): Grade {
   const a = Number(thresholds.gradeA) || 80
   const b = Number(thresholds.gradeB) || 60
   if (vetoed) return 'C'
-  if (total >= a) return 'A'
+  if (gateFailCount >= 2) return 'C'
+  if (total >= a && gateFailCount === 0) return 'A'
   if (total >= b) return 'B'
   return 'C'
 }

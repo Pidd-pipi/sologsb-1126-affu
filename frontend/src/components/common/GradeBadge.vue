@@ -4,7 +4,7 @@
  * 被 `/`（名次表）、`/sites/:id`（详情）、`/map`（地图标记）消费。
  */
 import { computed } from 'vue'
-import { GRADE_COLOR, GRADE_LABEL, type Grade } from '@/utils/score'
+import { GRADE_COLOR, GRADE_LABEL, type Grade, type GateFail } from '@/utils/score'
 import { formatScore } from '@/utils/format'
 
 const props = withDefaults(
@@ -17,19 +17,29 @@ const props = withDefaults(
     vetoed?: boolean
     /** 是否展示等级文案 */
     showLabel?: boolean
+    /** 未通过的硬门槛，用于说明等级是否被门槛压低 */
+    gateFails?: GateFail[]
   }>(),
   {
     score: undefined,
     size: 'default',
     vetoed: false,
-    showLabel: true
+    showLabel: true,
+    gateFails: () => []
   }
 )
 
 const color = computed(() => (props.vetoed ? '#b91c1c' : GRADE_COLOR[props.grade]))
 
+const gateLimited = computed(() => !props.vetoed && props.gateFails.length > 0)
+
 const label = computed(() => {
   if (props.vetoed) return `${props.grade} 级 · 命中否决`
+  if (gateLimited.value) {
+    return props.gateFails.length >= 2
+      ? `${props.grade} 级 · 两项门槛不达标`
+      : `${props.grade} 级 · 门槛受限（最高 B）`
+  }
   return GRADE_LABEL[props.grade]
 })
 

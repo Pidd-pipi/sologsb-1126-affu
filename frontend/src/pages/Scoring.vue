@@ -8,12 +8,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import WeightEditor from '@/components/common/WeightEditor.vue'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import GateTags from '@/components/common/GateTags.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { NORMALIZE_LABELS, SEASONS, weightSumGuard } from '@/types/score'
-import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
+import { NORMALIZE_LABELS, SEASONS, gatePreset, normalizeGates } from '@/types/score'
+import type { FactorWeights, NormalizeMethod, GradeThresholds, HardGates } from '@/types/score'
 import { formatScore } from '@/utils/format'
 import { weightSum } from '@/utils/score'
 
@@ -27,6 +28,7 @@ const activeSnapshot = ref<{
   weights: FactorWeights
   normalize: NormalizeMethod
   thresholds: GradeThresholds
+  gates: HardGates
   season: string
 } | null>(null)
 
@@ -37,9 +39,10 @@ function snapshotActive(): void {
     weights: { ...p.weights },
     normalize: p.normalize,
     thresholds: { ...p.thresholds },
+    gates: normalizeGates(p.gates),
     season: p.season
   }
-  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season)
+  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season, p.gates)
 }
 
 onMounted(() => {
@@ -57,6 +60,7 @@ const { ranked, best } = useRanking({
   weights: () => uiStore.workingWeights,
   normalize: () => uiStore.workingNormalize,
   thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -77,8 +81,10 @@ function onWeightsChange(next: FactorWeights): void {
   uiStore.dirty = true
 }
 
-function onPreset(next: FactorWeights): void {
+function onPreset(next: FactorWeights, name?: string): void {
   uiStore.workingWeights = { ...next }
+  // 场景预设联动配套硬门槛：亲子 / 雨季 / 重装
+  if (name) uiStore.workingGates = gatePreset(name)
   uiStore.dirty = true
 }
 
@@ -109,14 +115,36 @@ function onThresholdChange(): void {
   uiStore.dirty = true
 }
 
+/* ------------------------------ 硬门槛临时调整 ------------------------------ */
+function setMaxSlope(value: number | undefined): void {
+  if (typeof value !== 'number') return
+  uiStore.patchWorkingGates({ maxSlope: value })
+}
+
+function setMinSignal(value: number | undefined): void {
+  if (typeof value !== 'number') return
+  uiStore.patchWorkingGates({ minSignal: value })
+}
+
+function setMaxWater(value: number | undefined): void {
+  if (typeof value !== 'number') return
+  uiStore.patchWorkingGates({ maxWaterDistance: value })
+}
+
+/** 一键应用场景门槛（只改门槛，不动权重） */
+function applyGatePreset(name: string): void {
+  uiStore.workingGates = gatePreset(name)
+  uiStore.dirty = true
+}
+
 function revertToActive(): void {
   const snap = activeSnapshot.value
   if (!snap) {
     ElMessage.info('当前没有启用中的方案')
     return
   }
-  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season)
-  ElMessage.success('已恢复到当前启用方案的权重')
+  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season, snap.gates)
+  ElMessage.success('已恢复到当前启用方案的权重与门槛')
 }
 
 /* --------------------------- 另存为季节方案 --------------------------- */
@@ -145,6 +173,7 @@ async function confirmSave(): Promise<void> {
     weights: { ...uiStore.workingWeights },
     normalize: uiStore.workingNormalize,
     thresholds: { ...uiStore.workingThresholds },
+    gates: normalizeGates(uiStore.workingGates),
     season: saveForm.value.season,
     active: saveForm.value.activate,
     note:
@@ -207,8 +236,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
       <div class="page-head__title">
         <h1>权重与评分</h1>
         <p>
-          拖动下方各因子权重条，右侧名次会实时重排；调整归一方式与 A/B/C 阈值可改变整体松紧。
-          满意后可另存为季节方案，首页与详情页会立即采用启用中的方案。
+          拖动下方各因子权重条、调整归一方式与 A/B/C 阈值，右侧名次会实时重排；
+          硬门槛（坡度上限、信号下限、水源距离上限）与权重解耦：任一不达标最高评 B，两项及以上直接评 C。
+          所有调整立即反映到名次、等级与地图颜色，满意后另存为季节方案，切回已保存方案即恢复其门槛。
         </p>
       </div>
       <div class="page-actions">
@@ -314,6 +344,73 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           />
         </div>
       </div>
+
+      <el-divider content-position="left">场景硬门槛（与权重解耦）</el-divider>
+      <div class="gate-editor">
+        <div class="gate-editor__presets">
+          <span class="scoring-config__label">场景快选</span>
+          <el-button size="small" @click="applyGatePreset('balanced')">均衡</el-button>
+          <el-button size="small" @click="applyGatePreset('family')">亲子舒适</el-button>
+          <el-button size="small" @click="applyGatePreset('typhoon')">雨季防风</el-button>
+          <el-button size="small" @click="applyGatePreset('wild')">重装野营</el-button>
+          <span class="weight-note">改门槛不影响权重合计，名次、等级与地图颜色立即变化</span>
+        </div>
+        <div class="scoring-config">
+          <div class="scoring-config__item">
+            <span class="scoring-config__label">坡度上限</span>
+            <el-input-number
+              :model-value="uiStore.workingGates.maxSlope"
+              :min="0"
+              :max="45"
+              :step="0.5"
+              :precision="1"
+              size="small"
+              style="width: 130px"
+              controls-position="right"
+              @update:model-value="setMaxSlope"
+            />
+            <span class="weight-note">实测坡度 &gt; 上限即不达标（°）</span>
+          </div>
+          <div class="scoring-config__item">
+            <span class="scoring-config__label">信号下限</span>
+            <el-input-number
+              :model-value="uiStore.workingGates.minSignal"
+              :min="0"
+              :max="5"
+              :step="1"
+              size="small"
+              style="width: 130px"
+              controls-position="right"
+              @update:model-value="setMinSignal"
+            />
+            <span class="weight-note">实测信号 &lt; 下限即不达标（格，0-5）</span>
+          </div>
+          <div class="scoring-config__item">
+            <span class="scoring-config__label">水源距离上限</span>
+            <el-input-number
+              :model-value="uiStore.workingGates.maxWaterDistance"
+              :min="0"
+              :max="5000"
+              :step="10"
+              size="small"
+              style="width: 130px"
+              controls-position="right"
+              @update:model-value="setMaxWater"
+            />
+            <span class="weight-note">实测距离 &gt; 上限即不达标（m）</span>
+          </div>
+          <div class="scoring-config__item">
+            <el-alert
+              type="info"
+              :closable="false"
+              show-icon
+              title="判定规则"
+              description="三项全部达标才可能评 A；任一不达标最高只能评 B；两项及以上不达标直接评 C。此规则独立于综合得分，命中风险否决仍直接 C。"
+              class="gate-editor__rule"
+            />
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -349,9 +446,20 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
             <strong class="total">{{ formatScore(row.total) }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="等级" width="190">
+        <el-table-column label="等级" width="230">
           <template #default="{ row }">
-            <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" size="small" />
+            <GradeBadge
+              :grade="row.grade"
+              :score="row.total"
+              :vetoed="row.vetoed"
+              :gate-fails="row.gateFails"
+              size="small"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="硬门槛" min-width="200">
+          <template #default="{ row }">
+            <GateTags :fails="row.gateFails" size="small" />
           </template>
         </el-table-column>
         <el-table-column label="否决" width="120">
@@ -387,10 +495,17 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-table-column label="归一方式" width="120">
           <template #default="{ row }">{{ NORMALIZE_LABELS[row.normalize as NormalizeMethod] }}</template>
         </el-table-column>
-        <el-table-column label="阈值 A / B" width="120" align="center">
+        <el-table-column label="阈值 A / B" width="110" align="center">
           <template #default="{ row }">{{ row.thresholds.gradeA }} / {{ row.thresholds.gradeB }}</template>
         </el-table-column>
-        <el-table-column label="权重合计" width="106" align="center">
+        <el-table-column label="硬门槛（坡/信/水）" width="170" align="center">
+          <template #default="{ row }">
+            {{ normalizeGates(row.gates).maxSlope }}° ·
+            {{ normalizeGates(row.gates).minSignal }}格 ·
+            {{ normalizeGates(row.gates).maxWaterDistance }}m
+          </template>
+        </el-table-column>
+        <el-table-column label="权重合计" width="96" align="center">
           <template #default="{ row }">{{ weightSum(row.weights) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="230" fixed="right">
@@ -431,6 +546,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           <span class="weight-note">
             权重合计 {{ totalWeight }} · {{ NORMALIZE_LABELS[uiStore.workingNormalize] }} · 阈值 A ≥
             {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }}
+            <br />
+            硬门槛：坡度 ≤ {{ uiStore.workingGates.maxSlope }}° · 信号 ≥
+            {{ uiStore.workingGates.minSignal }} 格 · 水源 ≤ {{ uiStore.workingGates.maxWaterDistance }} m
           </span>
         </el-form-item>
       </el-form>
@@ -447,6 +565,20 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.gate-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gate-editor__presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gate-editor__rule {
+  margin-top: 2px;
 }
 .scoring-config__item {
   display: flex;

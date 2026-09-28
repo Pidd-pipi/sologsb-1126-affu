@@ -8,29 +8,54 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import MapPanel from '@/components/common/MapPanel.vue'
 import FactorScoreBar from '@/components/common/FactorScoreBar.vue'
+import GateTags from '@/components/common/GateTags.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
+import { useUiStore } from '@/stores/uiStore'
 import { useLocalDraft } from '@/hooks/useLocalDraft'
 import { ASPECT_TYPES, SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import type { AspectType, Campsite, SurfaceType, AccessMode } from '@/types/campsite'
 import type { FactorAssessment, RockfallRisk, WindDir, WindForce } from '@/types/factor'
 import { ROCKFALL_RISKS, WIND_DIRS, WIND_FORCES } from '@/types/factor'
-import { FACTOR_META, DEFAULT_WEIGHTS } from '@/types/score'
+import { FACTOR_META } from '@/types/score'
 import type { FactorKey, FactorWeights } from '@/types/score'
 import {
   buildFactorRows,
   buildNormalizedMatrix,
+  checkGates,
   gradeOf,
   rawValuesOf,
   weightedTotal,
+  type GateFail,
   type Grade
 } from '@/utils/score'
+import { useRanking } from '@/hooks/useRanking'
 import { isValidLngLat, formatLng, formatLat } from '@/utils/geo'
 import { formatFactorValue, todayIso } from '@/utils/format'
 
 const router = useRouter()
 const siteStore = useSiteStore()
 const profileStore = useProfileStore()
+const uiStore = useUiStore()
+
+/** 地图上既有营位的等级与门槛（受评分页临时门槛影响） */
+const { scoreOf } = useRanking({
+  sites: () => siteStore.list,
+  factorOf: (id: number) => siteStore.latestFactor(id),
+  weights: () => uiStore.workingWeights,
+  normalize: () => uiStore.workingNormalize,
+  thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
+  vetoedIds: () => uiStore.vetoedSiteIds
+})
+
+function gradeOfSite(id: number): Grade {
+  return scoreOf(id)?.grade ?? 'C'
+}
+
+function gateFailsOf(id: number): GateFail[] {
+  return scoreOf(id)?.gateFails ?? []
+}
 
 interface SiteForm {
   code: string
@@ -193,11 +218,8 @@ const previewFactor = computed<FactorAssessment>(() => ({
   updatedAt: ''
 }))
 
-const previewWeights = computed<FactorWeights>(() => ({
-  ...DEFAULT_WEIGHTS,
-  ...(profileStore.activeProfile?.weights ?? {})
-}))
-const previewNormalize = computed(() => profileStore.activeProfile?.normalize ?? 'minmax')
+const previewWeights = computed<FactorWeights>(() => ({ ...uiStore.workingWeights }))
+const previewNormalize = computed(() => uiStore.workingNormalize)
 
 const previewRaw = computed(() => rawValuesOf(previewSite.value, previewFactor.value))
 
@@ -228,11 +250,14 @@ const previewTotal = computed(() =>
   weightedTotal(previewNormalized.value, previewWeights.value)
 )
 
+const previewGateFails = computed(() => checkGates(previewRaw.value, uiStore.workingGates))
+
 const previewGrade = computed<Grade>(() =>
   gradeOf(
     previewTotal.value,
-    profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-    false
+    uiStore.workingThresholds,
+    false,
+    previewGateFails.value.length
   )
 )
 
@@ -322,6 +347,8 @@ async function submit(): Promise<void> {
     <MapPanel
       :sites="siteStore.list"
       :selected-id="null"
+      :grade-of="gradeOfSite"
+      :gate-fails-of="gateFailsOf"
       mode="pick"
       height="380px"
       title="候选营位分布（点选拾取经纬度）"
@@ -556,6 +583,7 @@ async function submit(): Promise<void> {
         <span>预估综合得分</span>
         <strong>{{ previewTotal }}</strong>
         <span class="muted">预估等级 {{ previewGrade }}</span>
+        <GateTags :fails="previewGateFails" size="small" />
       </div>
       <div class="factor-grid">
         <FactorScoreBar
@@ -592,9 +620,10 @@ async function submit(): Promise<void> {
 }
 .preview-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 .preview-head strong {
   font-size: 24px;

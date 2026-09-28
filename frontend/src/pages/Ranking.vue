@@ -13,9 +13,10 @@ import { useRanking } from '@/hooks/useRanking'
 import { FACTOR_META } from '@/types/score'
 import { SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import GateTags from '@/components/common/GateTags.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { formatScore } from '@/utils/format'
-import { NORMALIZE_LABELS } from '@/types/score'
+import { NORMALIZE_LABELS, normalizeGates } from '@/types/score'
 
 const router = useRouter()
 const siteStore = useSiteStore()
@@ -39,9 +40,11 @@ const inputSites = computed(() =>
 const { ranked } = useRanking({
   sites: () => inputSites.value,
   factorOf: (siteId: number) => siteStore.latestFactor(siteId),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  // 名次表与评分页共享 uiStore 工作区：评分页临时调整门槛，首页立即重算
+  weights: () => uiStore.workingWeights,
+  normalize: () => uiStore.workingNormalize,
+  thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingGates,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -60,6 +63,11 @@ function rowClass({ row }: { row: { vetoed: boolean } }): string {
   return row.vetoed ? 'veto-row' : ''
 }
 
+/** 某行是否卡在指定硬门槛（供单元格标红） */
+function isGateBlocked(row: { gateFails?: Array<{ key: string }> }, key: string): boolean {
+  return !!row.gateFails?.some((f) => f.key === key)
+}
+
 const stats = computed(() => {
   const rows = ranked.value
   return {
@@ -76,6 +84,12 @@ const activeNormalize = computed(() =>
   profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—'
 )
 
+/** 当前生效门槛（评分页临时调整时也取工作区的值） */
+const activeGates = computed(() => normalizeGates(uiStore.workingGates))
+const gateBlockedCount = computed(
+  () => ranked.value.filter((r) => r.gateFails.length > 0).length
+)
+
 function openDetail(siteId: number | undefined): void {
   if (typeof siteId !== 'number') return
   void router.push(`/sites/${siteId}`)
@@ -89,7 +103,7 @@ function openDetail(siteId: number | undefined): void {
         <h1>营位名次表</h1>
         <p>
           按当前权重方案对全部候选营位加权求和后降序排列，实时给出 A/B/C 推荐等级；
-          命中风险否决项的营位整行标红并自动降为 C 级。
+          坡度、信号、水源三项硬门槛任一不达标最高评 B，两项及以上直接评 C；命中风险否决项整行标红。
         </p>
       </div>
       <div class="page-actions">
@@ -111,11 +125,18 @@ function openDetail(siteId: number | undefined): void {
         <div class="stat-card__extra">阈值来自当前方案</div>
       </div>
       <div class="stat-card">
+        <div class="stat-card__label">门槛受限</div>
+        <div class="stat-card__value" :style="{ color: gateBlockedCount ? '#d97706' : undefined }">
+          {{ gateBlockedCount }}
+        </div>
+        <div class="stat-card__extra">坡度 / 信号 / 水源卡门槛的营位</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-card__label">命中否决</div>
         <div class="stat-card__value" :style="{ color: stats.vetoed ? '#b91c1c' : undefined }">
           {{ stats.vetoed }}
         </div>
-        <div class="stat-card__extra">否决后禁止评 A</div>
+        <div class="stat-card__extra">否决后直接评 C</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">最高综合得分</div>
@@ -128,7 +149,9 @@ function openDetail(siteId: number | undefined): void {
       <div class="panel__head">
         <h2>筛选条件</h2>
         <span class="weight-note">
-          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }}
+          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }} · 门槛：坡度 ≤
+          {{ activeGates.maxSlope }}° / 信号 ≥ {{ activeGates.minSignal }} 格 / 水源 ≤
+          {{ activeGates.maxWaterDistance }} m
         </span>
       </div>
       <div class="filters">
@@ -201,19 +224,25 @@ function openDetail(siteId: number | undefined): void {
         </el-table-column>
         <el-table-column label="坡度" width="92" align="right">
           <template #default="{ row }">
-            {{ row.raw.slope.toFixed(1) }}°
+            <span :class="{ 'cell-bad': isGateBlocked(row, 'maxSlope') }">
+              {{ row.raw.slope.toFixed(1) }}°
+            </span>
             <div class="cell-sub">归一 {{ normalizedOf(row, 'slope') }}</div>
           </template>
         </el-table-column>
         <el-table-column label="水源距离" width="104" align="right">
           <template #default="{ row }">
-            {{ row.raw.waterDistance }} m
+            <span :class="{ 'cell-bad': isGateBlocked(row, 'maxWaterDistance') }">
+              {{ row.raw.waterDistance }} m
+            </span>
             <div class="cell-sub">归一 {{ normalizedOf(row, 'waterDistance') }}</div>
           </template>
         </el-table-column>
         <el-table-column label="信号" width="92" align="right">
           <template #default="{ row }">
-            {{ row.raw.signal }} 格
+            <span :class="{ 'cell-bad': isGateBlocked(row, 'minSignal') }">
+              {{ row.raw.signal }} 格
+            </span>
             <div class="cell-sub">归一 {{ normalizedOf(row, 'signal') }}</div>
           </template>
         </el-table-column>
@@ -233,7 +262,17 @@ function openDetail(siteId: number | undefined): void {
         </el-table-column>
         <el-table-column label="等级" width="210">
           <template #default="{ row }">
-            <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" />
+            <GradeBadge
+              :grade="row.grade"
+              :score="row.total"
+              :vetoed="row.vetoed"
+              :gate-fails="row.gateFails"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="硬门槛" min-width="210">
+          <template #default="{ row }">
+            <GateTags :fails="row.gateFails" />
           </template>
         </el-table-column>
         <el-table-column label="否决项" min-width="180">
@@ -295,6 +334,10 @@ function openDetail(siteId: number | undefined): void {
 .cell-sub {
   font-size: 11px;
   color: var(--gb-muted);
+}
+.cell-bad {
+  color: #b91c1c;
+  font-weight: 700;
 }
 .total-score {
   font-size: 15px;
