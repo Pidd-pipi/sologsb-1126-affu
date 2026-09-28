@@ -3,12 +3,13 @@
  * 应用外壳：顶部导航 + 全局统计 + 页脚存储说明。
  * 挂载时并行加载四张表（sites / factors / profiles / vetos），保证各页面首屏即有数据。
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { resolveAmapKey } from '@/hooks/useAmapLoader'
+import { DEFAULT_THRESHOLDS } from '@/types/score'
 
 const route = useRoute()
 const siteStore = useSiteStore()
@@ -29,12 +30,28 @@ const mapModeText = computed(() =>
   resolveAmapKey() ? '高德地图模式' : 'SVG 网格降级模式（未配置 VITE_AMAP_KEY）'
 )
 
+/** 把启用方案同步到评分页的临时编辑态；首次加载与启用方案切换后都执行一次。 */
+function syncActiveProfileToWorking(): void {
+  const p = profileStore.activeProfile
+  if (!p) return
+  uiStore.syncFromProfile(
+    p.weights,
+    p.normalize,
+    p.thresholds ?? DEFAULT_THRESHOLDS,
+    p.season,
+    p.limits
+  )
+}
+
+watch(() => profileStore.activeProfile?.id, syncActiveProfileToWorking)
+
 onMounted(async () => {
   await Promise.all([
     siteStore.load(),
     profileStore.load(),
     uiStore.loadVetos()
   ])
+  syncActiveProfileToWorking()
 })
 </script>
 

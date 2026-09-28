@@ -5,17 +5,18 @@
  *   v1 建 sites / factors 两张表
  *   v2 新增 profiles 表，并为 factors 补 siteId 索引
  *   v3 新增 vetos 表，并为存量营位回填默认权重方案
+ *   v4 为权重方案增加硬性门槛（坡度上限 / 信号下限 / 水源距离上限），旧方案回填默认门槛
  */
 import Dexie, { type Table } from 'dexie'
 import type { Campsite } from '@/types/campsite'
 import type { FactorAssessment } from '@/types/factor'
 import type { ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, normalizeLimitGates } from '@/types/score'
 import type { RiskVeto } from '@/types/veto'
 
 export const DB_NAME = 'gbcampsite-db'
 /** 当前数据结构版本号 */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 
 export class GbCampsiteDatabase extends Dexie {
   sites!: Table<Campsite, number>
@@ -53,7 +54,7 @@ export class GbCampsiteDatabase extends Dexie {
       })
 
     // v3：新增风险否决表；为存量营位回填默认方案 id 与新增字段缺省值
-    this.version(DB_VERSION)
+    this.version(3)
       .stores({
         sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
         factors: '++id, siteId, assessedAt, assessor',
@@ -72,6 +73,24 @@ export class GbCampsiteDatabase extends Dexie {
             if (typeof s.note !== 'string') s.note = ''
             if (typeof s.flatness !== 'number') s.flatness = 70
             if (typeof s.tentCapacity !== 'number') s.tentCapacity = 1
+          })
+      })
+
+    // v4：权重方案增加硬性门槛（坡度上限 / 信号下限 / 水源距离上限）。
+    // 旧方案没有 limits 字段，按均衡型默认门槛回填，升级后照常启用。
+    this.version(DB_VERSION)
+      .stores({
+        sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
+        factors: '++id, siteId, assessedAt, assessor',
+        profiles: '++id, name, season, active, updatedAt',
+        vetos: '++id, siteId, type, judgedAt'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('profiles')
+          .toCollection()
+          .modify((p: Partial<ScoreProfile>) => {
+            p.limits = normalizeLimitGates(p.limits)
           })
       })
   }
@@ -102,6 +121,7 @@ function seedProfiles(): ScoreProfile[] {
       weights: { ...DEFAULT_WEIGHTS },
       normalize: 'minmax',
       thresholds: { gradeA: 78, gradeB: 58 },
+      limits: { maxSlope: 8, minSignal: 2, maxWaterDistance: 300 },
       season: '四季通用',
       active: true,
       note: '默认方案，坡度、水源、落石三项权重略高，适用于大多数山谷营地。',
@@ -126,6 +146,7 @@ function seedProfiles(): ScoreProfile[] {
       },
       normalize: 'threshold',
       thresholds: { gradeA: 82, gradeB: 62 },
+      limits: { maxSlope: 6, minSignal: 1, maxWaterDistance: 250 },
       season: '夏季',
       active: false,
       note: '雨季强调风力遮蔽与水系距离，阈值分段避免极差归一被单个离群营位拉偏。',

@@ -8,24 +8,26 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import GradeBadge from '@/components/common/GradeBadge.vue'
 import { useSiteStore } from '@/stores/siteStore'
-import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
+import { useScoringConfig } from '@/hooks/useScoringConfig'
 import { VETO_TYPES, VETO_HINTS } from '@/types/veto'
 import type { VetoType } from '@/types/veto'
 import { formatDate, todayIso } from '@/utils/format'
 
 const router = useRouter()
 const siteStore = useSiteStore()
-const profileStore = useProfileStore()
 const uiStore = useUiStore()
+
+const scoring = useScoringConfig()
 
 const { scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => scoring.weights.value,
+  normalize: () => scoring.normalize.value,
+  thresholds: () => scoring.thresholds.value,
+  gates: () => scoring.gates.value,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 

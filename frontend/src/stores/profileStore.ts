@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { FactorWeights, ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, normalizeLimitGates } from '@/types/score'
 import { nowIso } from '@/utils/format'
 
 export const useProfileStore = defineStore('profile', () => {
@@ -23,7 +23,9 @@ export const useProfileStore = defineStore('profile', () => {
   async function load(): Promise<void> {
     loading.value = true
     try {
-      list.value = await db.profiles.orderBy('id').toArray()
+      const rows = await db.profiles.orderBy('id').toArray()
+      // 旧版本写入的方案可能没有 limits 字段，读出时就地补齐，保证页面任何分支都能取到门槛
+      list.value = rows.map((p) => ({ ...p, limits: normalizeLimitGates(p.limits) }))
       loaded.value = true
     } finally {
       loading.value = false
@@ -36,6 +38,7 @@ export const useProfileStore = defineStore('profile', () => {
       ...input,
       weights: { ...DEFAULT_WEIGHTS, ...input.weights },
       thresholds: { ...input.thresholds },
+      limits: normalizeLimitGates(input.limits),
       createdAt: now,
       updatedAt: now
     }) as ScoreProfile
@@ -58,6 +61,7 @@ export const useProfileStore = defineStore('profile', () => {
       weights: { ...DEFAULT_WEIGHTS, ...(src?.weights ?? {}) },
       normalize: src?.normalize ?? 'minmax',
       thresholds: { ...(src?.thresholds ?? { gradeA: 78, gradeB: 58 }) },
+      limits: normalizeLimitGates(src?.limits),
       season: season ?? src?.season ?? '四季通用',
       active: false,
       note: src?.note ? `由「${src.name}」复制：${src.note}` : `由「${src?.name ?? '默认方案'}」复制`,

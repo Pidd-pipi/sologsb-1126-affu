@@ -14,7 +14,8 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { FACTOR_META, NORMALIZE_LABELS } from '@/types/score'
+import { useScoringConfig } from '@/hooks/useScoringConfig'
+import { FACTOR_META, LIMIT_GATE_META, NORMALIZE_LABELS } from '@/types/score'
 import { ASPECT_TYPES, SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import type { AspectType, AccessMode, SurfaceType } from '@/types/campsite'
 import type { Grade } from '@/utils/score'
@@ -31,15 +32,18 @@ const siteStore = useSiteStore()
 const profileStore = useProfileStore()
 const uiStore = useUiStore()
 
+const scoring = useScoringConfig()
+
 const siteId = computed(() => Number(route.params.id))
 const site = computed(() => siteStore.byId(siteId.value))
 
 const { scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => scoring.weights.value,
+  normalize: () => scoring.normalize.value,
+  thresholds: () => scoring.thresholds.value,
+  gates: () => scoring.gates.value,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -50,12 +54,26 @@ function gradeOfSite(id: number): Grade {
   return scoreOf(id)?.grade ?? 'C'
 }
 
+/** 供 MapPanel 在标记上标注门槛卡限 */
+function gateFailsOf(id: number) {
+  return scoreOf(id)?.gateFails ?? []
+}
+
 function openSite(id: number): void {
   void router.push(`/sites/${id}`)
 }
 const grade = computed(() => scoreRow.value?.grade ?? 'C')
 const factorHistory = computed(() => siteStore.factorsOf(siteId.value))
 const vetoList = computed(() => uiStore.vetosOf(siteId.value))
+const gateFails = computed(() => scoreRow.value?.gateFails ?? [])
+
+/** 当前方案的门槛摘要（临时调整门槛时随动） */
+const gateSummary = computed(() =>
+  LIMIT_GATE_META.map((m) => {
+    const v = scoring.gates.value[m.key]
+    return `${m.shortLabel}${m.key === 'minSignal' ? '≥' : '≤'}${v}${m.unit}`
+  }).join(' · ')
+)
 
 /* --------------------------- 多轮因子复核录入 --------------------------- */
 const showFactorForm = ref(false)
@@ -259,10 +277,28 @@ watch(
       :description="vetoList.map((v) => `${v.type}：${v.description}`).join(' ｜ ')"
     />
 
+    <el-alert
+      v-if="gateFails.length >= 2"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="`该营位有 ${gateFails.length} 项硬性门槛不达标，综合等级已被压到 C 级`"
+      :description="gateFails.map((g) => g.reason).join(' ｜ ')"
+    />
+    <el-alert
+      v-else-if="gateFails.length === 1"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="该营位有 1 项硬性门槛不达标，最高只能评 B 级"
+      :description="gateFails[0].reason"
+    />
+
     <MapPanel
       :sites="siteStore.list"
       :selected-id="siteId"
       :grade-of="gradeOfSite"
+      :gate-fails-of="gateFailsOf"
       height="360px"
       :title="`营位定位 · ${site.code}`"
       @select="openSite"
@@ -378,8 +414,22 @@ watch(
         <h2>因子打分表</h2>
         <span class="weight-note">
           归一方式：{{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
-          · 等级阈值 A ≥ {{ profileStore.activeProfile?.thresholds.gradeA ?? 78 }} / B ≥
-          {{ profileStore.activeProfile?.thresholds.gradeB ?? 58 }}
+          · 等级阈值 A ≥ {{ scoring.thresholds.value.gradeA }} / B ≥
+          {{ scoring.thresholds.value.gradeB }}
+          · 门槛：{{ gateSummary }}
+        </span>
+      </div>      <div v-if="gateFails.length" class="gate-alert">
+        <el-tag
+          v-for="g in gateFails"
+          :key="g.key"
+          :type="gateFails.length >= 2 ? 'danger' : 'warning'"
+          size="small"
+          class="mr6"
+        >
+          卡{{ g.label }}：{{ g.reason }}
+        </el-tag>
+        <span class="weight-note">
+          {{ gateFails.length >= 2 ? '两项及以上不达标，直接评 C。' : '一项不达标，最高只能评 B。' }}
         </span>
       </div>
       <div class="factor-grid">
@@ -646,5 +696,15 @@ watch(
 }
 .review-form {
   margin-bottom: 12px;
+}
+.gate-alert {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.mr6 {
+  margin-right: 6px;
 }
 </style>

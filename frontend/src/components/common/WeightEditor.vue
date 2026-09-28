@@ -5,7 +5,7 @@
  */
 import { computed } from 'vue'
 import type { FactorKey, FactorWeights } from '@/types/score'
-import { FACTOR_META, weightSumGuard } from '@/types/score'
+import { FACTOR_META } from '@/types/score'
 import { weightSum } from '@/utils/score'
 
 const props = defineProps<{
@@ -14,7 +14,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'change', weights: FactorWeights): void
-  (e: 'preset', weights: FactorWeights): void
+  /** 场景预设：传出预设键名（balanced/typhoon/family/wild），由父组件同时取配套门槛 */
+  (e: 'preset', name: string): void
 }>()
 
 const total = computed(() => weightSum(props.weights))
@@ -41,11 +42,11 @@ function update(key: FactorKey, value: number | number[] | undefined): void {
 }
 
 function applyPreset(name: string): void {
-  emit('preset', weightSumGuard(name))
+  emit('preset', name)
 }
 
 function resetAll(): void {
-  emit('preset', weightSumGuard('balanced'))
+  emit('preset', 'balanced')
 }
 </script>
 

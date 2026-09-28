@@ -6,8 +6,16 @@ import type { Campsite } from '@/types/campsite'
 import { ASPECT_SCORE } from '@/types/campsite'
 import type { FactorAssessment, RockfallRisk } from '@/types/factor'
 import { ROCKFALL_SCORE } from '@/types/factor'
-import type { FactorKey, FactorMeta, FactorWeights, GradeThresholds, NormalizeMethod } from '@/types/score'
-import { FACTOR_META } from '@/types/score'
+import type {
+  FactorKey,
+  FactorMeta,
+  FactorWeights,
+  GradeThresholds,
+  LimitGateKey,
+  LimitGates,
+  NormalizeMethod
+} from '@/types/score'
+import { FACTOR_META, LIMIT_GATE_META, normalizeLimitGates } from '@/types/score'
 
 /** 推荐等级 */
 export type Grade = 'A' | 'B' | 'C'
@@ -44,6 +52,19 @@ export interface FactorScoreRow {
   contribution: number
 }
 
+/** 单项硬性门槛的判定结果（同时供名次表与地图说明卡在哪几项） */
+export interface GateFail {
+  key: LimitGateKey
+  label: string
+  unit: string
+  /** 门槛值 */
+  limit: number
+  /** 营位实测值 */
+  actual: number
+  /** 面向领队的说明，如「坡度 9.6° 超过上限 8°」 */
+  reason: string
+}
+
 /** 一个营位的完整评分结果 */
 export interface SiteScore {
   siteId: number
@@ -52,6 +73,8 @@ export interface SiteScore {
   rows: FactorScoreRow[]
   vetoed: boolean
   vetoTypes: string[]
+  /** 未达标的硬性门槛明细（空数组表示三项全部通过） */
+  gateFails: GateFail[]
 }
 
 export function clamp(value: number, min = 0, max = 100): number {
@@ -157,12 +180,55 @@ export function weightedTotal(normalized: Record<FactorKey, number>, weights: Fa
   return round1(sum / weightSum)
 }
 
-/** 等级阈值判定；命中否决项时最高只能评 B，短路为 C。 */
-export function gradeOf(total: number, thresholds: GradeThresholds, vetoed: boolean): Grade {
+/**
+ * 硬性门槛判定：坡度 > 上限、信号 < 下限、水源距离 > 上限 各记一项不达标。
+ * 入参缺省时按均衡型默认门槛补齐，兼容旧方案数据。
+ */
+export function evaluateGates(raw: RawFactorValues, limits?: Partial<LimitGates> | null): GateFail[] {
+  const gates = normalizeLimitGates(limits)
+  const actualOf: Record<LimitGateKey, number> = {
+    maxSlope: raw.slope,
+    minSignal: raw.signal,
+    maxWaterDistance: raw.waterDistance
+  }
+  const fails: GateFail[] = []
+  for (const meta of LIMIT_GATE_META) {
+    const limit = gates[meta.key]
+    const actual = actualOf[meta.key]
+    const violated = meta.key === 'minSignal' ? actual < limit : actual > limit
+    if (!violated) continue
+    fails.push({
+      key: meta.key,
+      label: meta.label,
+      unit: meta.unit,
+      limit,
+      actual,
+      reason:
+        meta.key === 'minSignal'
+          ? `${meta.shortLabel} ${actual}${meta.unit} 低于下限 ${limit}${meta.unit}`
+          : `${meta.shortLabel} ${actual}${meta.unit} 超过上限 ${limit}${meta.unit}`
+    })
+  }
+  return fails
+}
+
+/**
+ * 等级阈值判定，短路顺序：
+ *   命中否决项          → 直接 C；
+ *   两项及以上门槛不达标 → 直接 C；
+ *   任一门槛不达标        → 最高只能评 B；
+ *   其余按综合得分落 A / B / C。
+ */
+export function gradeOf(
+  total: number,
+  thresholds: GradeThresholds,
+  vetoed: boolean,
+  gateFails: GateFail[] = []
+): Grade {
   const a = Number(thresholds.gradeA) || 80
   const b = Number(thresholds.gradeB) || 60
-  if (vetoed) return 'C'
-  if (total >= a) return 'A'
+  if (vetoed || gateFails.length >= 2) return 'C'
+  if (total >= a && gateFails.length === 0) return 'A'
   if (total >= b) return 'B'
   return 'C'
 }

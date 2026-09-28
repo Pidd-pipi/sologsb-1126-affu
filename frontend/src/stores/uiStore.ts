@@ -6,8 +6,8 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { RiskVeto } from '@/types/veto'
-import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import type { FactorWeights, LimitGates, NormalizeMethod, GradeThresholds } from '@/types/score'
+import { DEFAULT_LIMIT_GATES, DEFAULT_WEIGHTS, normalizeLimitGates } from '@/types/score'
 import type { AccessMode, SurfaceType } from '@/types/campsite'
 import { nowIso, todayIso } from '@/utils/format'
 
@@ -25,7 +25,14 @@ export const useUiStore = defineStore('ui', () => {
   const workingWeights = ref<FactorWeights>({ ...DEFAULT_WEIGHTS })
   const workingNormalize = ref<NormalizeMethod>('minmax')
   const workingThresholds = ref<GradeThresholds>({ gradeA: 78, gradeB: 58 })
+  /** 临时硬性门槛：坡度上限 / 信号下限 / 水源距离上限 */
+  const workingLimits = ref<LimitGates>({ ...DEFAULT_LIMIT_GATES })
   const workingSeason = ref<string>('四季通用')
+  /**
+   * working* 是否已从启用方案同步过。
+   * 未同步前各页直接读取启用方案；同步后临时调整立即在名次表 / 地图 / 详情页生效。
+   */
+  const workingReady = ref(false)
   const dirty = ref(false)
 
   /** 地图页当前选中的营位 id */
@@ -74,17 +81,20 @@ export const useUiStore = defineStore('ui', () => {
     Array.from(new Set(vetos.value.map((v) => v.siteId)))
   )
 
-  /** 用启用方案覆盖临时权重。 */
+  /** 用启用方案覆盖临时权重与门槛。 */
   function syncFromProfile(
     weights: FactorWeights,
     normalize: NormalizeMethod,
     thresholds: GradeThresholds,
-    season: string
+    season: string,
+    limits?: Partial<LimitGates> | null
   ): void {
     workingWeights.value = { ...DEFAULT_WEIGHTS, ...weights }
     workingNormalize.value = normalize
     workingThresholds.value = { ...thresholds }
+    workingLimits.value = normalizeLimitGates(limits)
     workingSeason.value = season
+    workingReady.value = true
     dirty.value = false
   }
 
@@ -108,7 +118,9 @@ export const useUiStore = defineStore('ui', () => {
     workingWeights,
     workingNormalize,
     workingThresholds,
+    workingLimits,
     workingSeason,
+    workingReady,
     dirty,
     focusedSiteId,
     vetoedSiteIds,

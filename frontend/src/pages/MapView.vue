@@ -13,8 +13,10 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
+import { useScoringConfig } from '@/hooks/useScoringConfig'
 import type { Grade } from '@/utils/score'
 import { useAmapLoader } from '@/hooks/useAmapLoader'
+import { LIMIT_GATE_META } from '@/types/score'
 import { SURFACE_TYPES } from '@/types/campsite'
 import { formatLat, formatLng, distanceMeters, formatDistance } from '@/utils/geo'
 import { formatDate } from '@/utils/format'
@@ -23,6 +25,8 @@ const router = useRouter()
 const siteStore = useSiteStore()
 const profileStore = useProfileStore()
 const uiStore = useUiStore()
+
+const scoring = useScoringConfig()
 
 /** 与 MapPanel 内保持一致的降级判定，用于页面顶部的模式说明 */
 const { hasKey, degraded: loaderDegraded, reason } = useAmapLoader(false)
@@ -43,9 +47,10 @@ const visibleSites = computed(() =>
 const { ranked, scoreOf } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => scoring.weights.value,
+  normalize: () => scoring.normalize.value,
+  thresholds: () => scoring.thresholds.value,
+  gates: () => scoring.gates.value,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -91,10 +96,23 @@ function gradeOfSite(id: number): Grade {
   return scoreOf(id)?.grade ?? 'C'
 }
 
+/** 供 MapPanel 在标记上标注「卡门槛」的营位 */
+function gateFailsOf(id: number) {
+  return scoreOf(id)?.gateFails ?? []
+}
+
 function selectSite(id: number): void {
   selectedId.value = id
   uiStore.focusedSiteId = id
 }
+
+/** 当前门槛摘要，临时调整门槛时随地图颜色一起变化 */
+const gateSummary = computed(() =>
+  LIMIT_GATE_META.map((m) => {
+    const v = scoring.gates.value[m.key]
+    return `${m.shortLabel}${m.key === 'minSignal' ? '≥' : '≤'}${v}${m.unit}`
+  }).join(' · ')
+)
 
 const gradeStats = computed(() => {
   const rows = ranked.value
@@ -113,7 +131,8 @@ const gradeStats = computed(() => {
         <h1>营位地图</h1>
         <p>
           按推荐等级给营位标记着色，命中风险否决项的营位以红点提示；
-          点击任一标记可查看该营位的得分构成、因子实测与否决记录。
+          坡度、信号、水源门槛不达标的营位标记带警示角标（一项最高 B、两项直接 C），
+          点击任一标记可查看该营位卡在哪几项门槛、得分构成与否决记录。
         </p>
       </div>
       <div class="page-actions">
@@ -157,8 +176,11 @@ const gradeStats = computed(() => {
       <div class="panel__head">
         <h2>筛选显示</h2>
         <span class="weight-note">
-          {{ hasKey ? 'key 已配置' : 'key 未配置（降级视图）' }} · 当前显示
-          {{ panelSites.length }} / {{ siteStore.total }} 个营位
+          {{ hasKey ? 'key 已配置' : 'key 未配置（降级视图）' }} · 门槛：{{ gateSummary }}
+          <el-tag v-if="uiStore.dirty" type="warning" size="small" effect="plain" class="ml6">
+            门槛 / 权重有临时调整
+          </el-tag>
+          · 当前显示 {{ panelSites.length }} / {{ siteStore.total }} 个营位
         </span>
       </div>
       <div class="filters">
@@ -190,6 +212,7 @@ const gradeStats = computed(() => {
       :sites="panelSites"
       :selected-id="selectedId"
       :grade-of="gradeOfSite"
+      :gate-fails-of="gateFailsOf"
       height="460px"
       title="营位分布与等级着色"
       @select="selectSite"
@@ -256,6 +279,23 @@ const gradeStats = computed(() => {
         </div>
       </div>
       <p v-if="selectedSite.note" class="panel__hint">现场备注：{{ selectedSite.note }}</p>
+      <div v-if="selectedRow?.gateFails.length" class="gate-block">
+        <span class="gate-block__title">
+          门槛卡限（{{ selectedRow.gateFails.length }} 项）：
+        </span>
+        <el-tag
+          v-for="g in selectedRow.gateFails"
+          :key="g.key"
+          :type="selectedRow.gateFails.length >= 2 ? 'danger' : 'warning'"
+          size="small"
+          class="mr6"
+        >
+          ⚠ {{ g.reason }}
+        </el-tag>
+      </div>
+      <div v-else class="gate-block">
+        <el-tag type="success" size="small" effect="plain">坡度 / 信号 / 水源三项门槛全部达标</el-tag>
+      </div>
       <div v-if="selectedVetos.length" class="veto-block">
         <el-tag v-for="v in selectedVetos" :key="v.id" type="danger" size="small" class="mr6">
           {{ v.type }}
@@ -307,6 +347,21 @@ const gradeStats = computed(() => {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+.gate-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.gate-block__title {
+  font-size: 12px;
+  color: var(--gb-ink);
+  font-weight: 600;
+}
+.ml6 {
+  margin-left: 6px;
 }
 .mr6 {
   margin-right: 6px;

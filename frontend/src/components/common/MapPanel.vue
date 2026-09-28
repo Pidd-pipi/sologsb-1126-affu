@@ -8,7 +8,7 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Campsite } from '@/types/campsite'
-import type { Grade } from '@/utils/score'
+import type { Grade, GateFail } from '@/utils/score'
 import { GRADE_COLOR } from '@/utils/score'
 import { boundsOf, formatLat, formatLng, projectToGrid, unprojectFromGrid } from '@/utils/geo'
 import { useAmapLoader, type AmapMapInstance, type AmapMarker } from '@/hooks/useAmapLoader'
@@ -21,6 +21,8 @@ const props = withDefaults(
     selectedId?: number | null
     /** 每个营位的等级，用于着色 */
     gradeOf?: (siteId: number) => Grade
+    /** 每个营位未达标的硬性门槛，用于在标记上加警示角标 */
+    gateFailsOf?: (siteId: number) => GateFail[]
     /** pick 模式下点击空白处会抛出经纬度（用于选点登记） */
     mode?: 'view' | 'pick'
     /** 地图高度 */
@@ -31,6 +33,7 @@ const props = withDefaults(
   {
     selectedId: null,
     gradeOf: undefined,
+    gateFailsOf: undefined,
     mode: 'view',
     height: '420px',
     title: '营位分布'
@@ -59,8 +62,21 @@ const points = computed(() =>
   props.sites.map((site) => {
     const pt = projectToGrid({ lng: site.lng, lat: site.lat }, bounds.value, GRID_W, GRID_H)
     const grade: Grade = props.gradeOf ? props.gradeOf(site.id ?? -1) : 'C'
-    return { site, x: pt.x, y: pt.y, color: GRADE_COLOR[grade], grade }
+    const gateFails = props.gateFailsOf ? props.gateFailsOf(site.id ?? -1) : []
+    return { site, x: pt.x, y: pt.y, color: GRADE_COLOR[grade], grade, gateFails }
   })
+)
+
+/** 供 AMap 标记重渲染时追踪等级 / 门槛变化（仅改权重或门槛时坐标不变） */
+const pointStateKey = computed(() =>
+  props.sites
+    .map((s) => {
+      const id = s.id ?? -1
+      const grade = props.gradeOf ? props.gradeOf(id) : 'C'
+      const fails = props.gateFailsOf ? props.gateFailsOf(id).map((g) => g.key).join(',') : ''
+      return `${id}:${grade}:${fails}`
+    })
+    .join('|')
 )
 
 const activeSite = computed(
@@ -107,10 +123,16 @@ function renderAmapMarkers(): void {
   markers = []
   if (props.sites.length === 0) return
   for (const item of points.value) {
+    const failCount = item.gateFails.length
+    const warn = failCount > 0
     const marker = new ns.Marker({
       position: [item.site.lng, item.site.lat],
-      title: `${item.site.code} ${item.site.name}`,
-      content: `<div class="gb-amap-pin" style="--pin:${item.color}"><span>${item.site.code.slice(-2)}</span><em>${item.grade}</em></div>`,
+      title: `${item.site.code} ${item.site.name}${
+        warn ? `（门槛不达标 ${failCount} 项：${item.gateFails.map((g) => g.label).join('、')}）` : ''
+      }`,
+      content: `<div class="gb-amap-pin" style="--pin:${item.color}"><span>${item.site.code.slice(-2)}</span><em>${item.grade}</em>${
+        warn ? '<b class="gb-amap-pin__warn">!</b>' : ''
+      }</div>`,
       offset: new ns.Pixel(-16, -16)
     })
     marker.on('click', () => emit('select', item.site.id as number))
@@ -160,7 +182,10 @@ watch(
 )
 
 watch(
-  () => props.sites.map((s) => `${s.id}:${s.lng}:${s.lat}`).join('|'),
+  () =>
+    props.sites
+      .map((s) => `${s.id}:${s.lng}:${s.lat}`)
+      .join('|') + '#' + pointStateKey.value,
   () => {
     if (amap.value && !degraded.value) renderAmapMarkers()
   }
@@ -249,7 +274,9 @@ onBeforeUnmount(() => {
           :class="{ 'is-active': pt.site.id === selectedId }"
           tabindex="0"
           role="button"
-          :aria-label="`${pt.site.code} ${pt.site.name}`"
+          :aria-label="`${pt.site.code} ${pt.site.name}${
+            pt.gateFails.length ? `，门槛不达标 ${pt.gateFails.length} 项` : ''
+          }`"
           @click.stop="emit('select', pt.site.id as number)"
         >
           <circle :cx="pt.x" :cy="pt.y" r="16" :fill="pt.color" opacity="0.16" />
@@ -257,6 +284,13 @@ onBeforeUnmount(() => {
           <text :x="pt.x" :y="pt.y + 3.5" text-anchor="middle" class="map-panel__nodeText">
             {{ pt.grade }}
           </text>
+          <g v-if="pt.gateFails.length" class="map-panel__nodeWarn">
+            <circle :cx="pt.x + 11" :cy="pt.y - 11" r="6.5" :fill="pt.gateFails.length >= 2 ? '#b91c1c' : '#d97706'" stroke="#ffffff" stroke-width="1.5" />
+            <text :x="pt.x + 11" :y="pt.y - 7.5" text-anchor="middle" class="map-panel__warnText">
+              !
+            </text>
+            <title>{{ pt.gateFails.map((g) => g.reason).join('；') }}</title>
+          </g>
           <text :x="pt.x + 14" :y="pt.y - 10" class="map-panel__nodeLabel">
             {{ pt.site.code }}
           </text>
@@ -269,10 +303,14 @@ onBeforeUnmount(() => {
             type="button"
             class="map-panel__legendBtn"
             :class="{ 'is-active': pt.site.id === selectedId }"
+            :title="pt.gateFails.map((g) => g.reason).join('；')"
             @click="emit('select', pt.site.id as number)"
           >
             <i :style="{ background: pt.color }" />
             {{ pt.site.code }} · {{ pt.site.name }}
+            <em v-if="pt.gateFails.length" class="map-panel__legendWarn" :class="{ 'is-c': pt.gateFails.length >= 2 }">
+              卡{{ pt.gateFails.length }}项
+            </em>
           </button>
         </li>
         <li v-if="!points.length" class="map-panel__legendEmpty">暂无营位</li>
@@ -292,6 +330,19 @@ onBeforeUnmount(() => {
       <span>{{ formatLng(activeSite.lng) }} / {{ formatLat(activeSite.lat) }}</span>
       <span>海拔 {{ activeSite.elevation }} m · 坡度 {{ activeSite.slope }}°</span>
       <span>{{ activeSite.surface }} · 容 {{ activeSite.tentCapacity }} 帐 · {{ activeSite.access }}</span>
+      <template v-for="pt in points" :key="`fc-${pt.site.id}`">
+        <template v-if="pt.site.id === activeSite.id">
+          <el-tag
+            v-for="g in pt.gateFails"
+            :key="g.key"
+            :type="pt.gateFails.length >= 2 ? 'danger' : 'warning'"
+            size="small"
+            effect="plain"
+          >
+            卡{{ g.label }}：{{ g.reason }}
+          </el-tag>
+        </template>
+      </template>
     </div>
     <div v-else-if="sites.length" class="map-panel__focus map-panel__focus--idle">
       <span>{{ fallbackLabel }}</span>
@@ -368,6 +419,15 @@ onBeforeUnmount(() => {
   fill: #ffffff;
   pointer-events: none;
 }
+.map-panel__nodeWarn {
+  cursor: pointer;
+}
+.map-panel__warnText {
+  font-size: 9px;
+  font-weight: 800;
+  fill: #ffffff;
+  pointer-events: none;
+}
 .map-panel__nodeLabel {
   font-size: 11px;
   fill: #3d5442;
@@ -415,6 +475,19 @@ onBeforeUnmount(() => {
 .map-panel__legendBtn.is-active {
   border-color: #14532d;
   background: #eef6f0;
+}
+.map-panel__legendWarn {
+  font-style: normal;
+  font-size: 10px;
+  color: #b45309;
+  background: #fef3e2;
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 2px;
+}
+.map-panel__legendWarn.is-c {
+  color: #b91c1c;
+  background: #fdeaea;
 }
 .map-panel__legendEmpty {
   font-size: 11px;
@@ -504,5 +577,21 @@ onBeforeUnmount(() => {
   font-size: 10px;
   padding: 0 3px;
   border: 1px solid var(--pin, #15803d);
+}
+.gb-amap-pin__warn {
+  position: absolute;
+  left: -6px;
+  bottom: -6px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #d97706;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+  border: 1.5px solid #fff;
+  box-sizing: content-box;
 }
 </style>

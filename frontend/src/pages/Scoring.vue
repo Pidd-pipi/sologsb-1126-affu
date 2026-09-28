@@ -12,8 +12,14 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { NORMALIZE_LABELS, SEASONS, weightSumGuard } from '@/types/score'
-import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
+import {
+  LIMIT_GATE_META,
+  NORMALIZE_LABELS,
+  SEASONS,
+  limitGatesPreset,
+  weightSumGuard
+} from '@/types/score'
+import type { FactorWeights, LimitGates, NormalizeMethod, GradeThresholds } from '@/types/score'
 import { formatScore } from '@/utils/format'
 import { weightSum } from '@/utils/score'
 
@@ -27,6 +33,7 @@ const activeSnapshot = ref<{
   weights: FactorWeights
   normalize: NormalizeMethod
   thresholds: GradeThresholds
+  limits: LimitGates
   season: string
 } | null>(null)
 
@@ -37,9 +44,10 @@ function snapshotActive(): void {
     weights: { ...p.weights },
     normalize: p.normalize,
     thresholds: { ...p.thresholds },
+    limits: { ...p.limits },
     season: p.season
   }
-  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season)
+  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season, p.limits)
 }
 
 onMounted(() => {
@@ -57,6 +65,7 @@ const { ranked, best } = useRanking({
   weights: () => uiStore.workingWeights,
   normalize: () => uiStore.workingNormalize,
   thresholds: () => uiStore.workingThresholds,
+  gates: () => uiStore.workingLimits,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -71,14 +80,45 @@ const gradeDistribution = computed(() => {
   }
 })
 
+/** 当前门槛下拉高 / 压低等级的营位数量，拖动门槛时与名次一起实时刷新 */
+const gateImpact = computed(() => {
+  const rows = ranked.value
+  return {
+    blocked: rows.filter((r) => r.gateFails.length > 0).length,
+    toC: rows.filter((r) => r.gateFails.length >= 2).length
+  }
+})
+
+/** 单项门槛卡住的营位数量与名称（编号），直接挂在编辑器旁 */
+function gateKeyImpact(key: keyof LimitGates): { count: number; names: string } {
+  const hit = ranked.value.filter((r) => r.gateFails.some((g) => g.key === key))
+  return {
+    count: hit.length,
+    names: hit
+      .slice(0, 3)
+      .map((r) => r.site.code)
+      .join('、') + (hit.length > 3 ? ' 等' : '')
+  }
+}
+
 /** 权重改变 → 标记为未保存，名次由 computed 自动重算 */
 function onWeightsChange(next: FactorWeights): void {
   uiStore.workingWeights = next
   uiStore.dirty = true
 }
 
-function onPreset(next: FactorWeights): void {
-  uiStore.workingWeights = { ...next }
+/** 场景预设同时带入配套的权重与硬性门槛 */
+function onPreset(name: string): void {
+  uiStore.workingWeights = { ...weightSumGuard(name) }
+  uiStore.workingLimits = limitGatesPreset(name)
+  uiStore.dirty = true
+}
+
+/** 更新单项门槛，名次、等级与地图颜色立即重算 */
+function onLimitChange(key: keyof LimitGates, value: number | number[] | undefined): void {
+  const num = Array.isArray(value) ? value[0] : value
+  if (typeof num !== 'number' || Number.isNaN(num)) return
+  uiStore.workingLimits = { ...uiStore.workingLimits, [key]: num }
   uiStore.dirty = true
 }
 
@@ -115,8 +155,14 @@ function revertToActive(): void {
     ElMessage.info('当前没有启用中的方案')
     return
   }
-  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season)
-  ElMessage.success('已恢复到当前启用方案的权重')
+  uiStore.syncFromProfile(
+    snap.weights,
+    snap.normalize,
+    snap.thresholds,
+    snap.season,
+    snap.limits
+  )
+  ElMessage.success('已恢复到当前启用方案的权重与门槛')
 }
 
 /* --------------------------- 另存为季节方案 --------------------------- */
@@ -145,6 +191,7 @@ async function confirmSave(): Promise<void> {
     weights: { ...uiStore.workingWeights },
     normalize: uiStore.workingNormalize,
     thresholds: { ...uiStore.workingThresholds },
+    limits: { ...uiStore.workingLimits },
     season: saveForm.value.season,
     active: saveForm.value.activate,
     note:
@@ -207,8 +254,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
       <div class="page-head__title">
         <h1>权重与评分</h1>
         <p>
-          拖动下方各因子权重条，右侧名次会实时重排；调整归一方式与 A/B/C 阈值可改变整体松紧。
-          满意后可另存为季节方案，首页与详情页会立即采用启用中的方案。
+          拖动下方各因子权重条，右侧名次会实时重排；调整归一方式、A/B/C 阈值与
+          坡度 / 信号 / 水源三项硬性门槛可改变整体松紧——任一门槛不达标最高评 B，
+          两项及以上直接评 C。满意后可另存为季节方案，首页、地图与详情页会立即采用启用中的方案。
         </p>
       </div>
       <div class="page-actions">
@@ -236,7 +284,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <div class="stat-card__value">
           {{ gradeDistribution.A }} / {{ gradeDistribution.B }} / {{ gradeDistribution.C }}
         </div>
-        <div class="stat-card__extra">随权重实时变化</div>
+        <div class="stat-card__extra">
+          门槛卡限 {{ gateImpact.blocked }} 个 · 两项以上评 C {{ gateImpact.toC }} 个
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">当前第一名</div>
@@ -314,6 +364,49 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           />
         </div>
       </div>
+
+      <el-divider content-position="left">硬性门槛（任一不达标最高 B，两项及以上直接 C）</el-divider>
+      <div class="scoring-config">
+        <div v-for="meta in LIMIT_GATE_META" :key="meta.key" class="scoring-config__item">
+          <span class="scoring-config__label">{{ meta.label }}</span>
+          <el-slider
+            :model-value="uiStore.workingLimits[meta.key]"
+            :min="meta.min"
+            :max="meta.max"
+            :step="meta.step"
+            style="width: 220px"
+            @update:model-value="(v: number | number[]) => onLimitChange(meta.key, v)"
+          />
+          <el-input-number
+            :model-value="uiStore.workingLimits[meta.key]"
+            :min="meta.min"
+            :max="meta.max"
+            :step="meta.step"
+            size="small"
+            style="width: 120px"
+            controls-position="right"
+            @update:model-value="(v: number | number[] | undefined) => onLimitChange(meta.key, v)"
+          />
+          <span class="weight-note">
+            {{ meta.ruleText.replace('{limit}', String(uiStore.workingLimits[meta.key])).replace('{unit}', meta.unit) }}
+          </span>
+          <el-tag
+            size="small"
+            :type="gateKeyImpact(meta.key).count === 0 ? 'success' : 'warning'"
+            effect="plain"
+          >
+            卡限 {{ gateKeyImpact(meta.key).count }} 个
+            <span v-if="gateKeyImpact(meta.key).count" class="gate-impact-names">
+              （{{ gateKeyImpact(meta.key).names }}）
+            </span>
+          </el-tag>
+        </div>
+        <p class="panel__hint" style="margin: 0">
+          门槛与权重不同：权重决定综合得分高低，门槛是「一票否决」式的硬条件。
+          此处临时调整后，名次表等级与地图标记颜色立即变化；
+          点「恢复当前方案」或切换到已保存方案时，门槛恢复为该方案保存的值。
+        </p>
+      </div>
     </section>
 
     <section class="panel">
@@ -349,9 +442,20 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
             <strong class="total">{{ formatScore(row.total) }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="等级" width="190">
+        <el-table-column label="等级" width="220">
           <template #default="{ row }">
             <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" size="small" />
+            <div v-if="row.gateFails.length" class="mini-gates">
+              <el-tag
+                v-for="g in row.gateFails"
+                :key="g.key"
+                :type="row.gateFails.length >= 2 ? 'danger' : 'warning'"
+                size="small"
+                effect="plain"
+              >
+                卡{{ g.label }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="否决" width="120">
@@ -387,8 +491,16 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-table-column label="归一方式" width="120">
           <template #default="{ row }">{{ NORMALIZE_LABELS[row.normalize as NormalizeMethod] }}</template>
         </el-table-column>
-        <el-table-column label="阈值 A / B" width="120" align="center">
+        <el-table-column label="阈值 A / B" width="110" align="center">
           <template #default="{ row }">{{ row.thresholds.gradeA }} / {{ row.thresholds.gradeB }}</template>
+        </el-table-column>
+        <el-table-column label="硬性门槛（坡 / 信号 / 水源）" min-width="210">
+          <template #default="{ row }">
+            <span class="gate-cell">
+              ≤{{ row.limits.maxSlope }}° · ≥{{ row.limits.minSignal }}格 ·
+              ≤{{ row.limits.maxWaterDistance }}m
+            </span>
+          </template>
         </el-table-column>
         <el-table-column label="权重合计" width="106" align="center">
           <template #default="{ row }">{{ weightSum(row.weights) }}</template>
@@ -431,6 +543,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           <span class="weight-note">
             权重合计 {{ totalWeight }} · {{ NORMALIZE_LABELS[uiStore.workingNormalize] }} · 阈值 A ≥
             {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }}
+            · 门槛 坡≤{{ uiStore.workingLimits.maxSlope }}° /
+            信号≥{{ uiStore.workingLimits.minSignal }}格 /
+            水源≤{{ uiStore.workingLimits.maxWaterDistance }}m
           </span>
         </el-form-item>
       </el-form>
@@ -476,6 +591,21 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
 .cell-sub {
   font-size: 11px;
   color: var(--gb-muted);
+}
+.mini-gates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 3px;
+}
+.gate-cell {
+  font-size: 12px;
+  color: var(--gb-ink);
+  font-variant-numeric: tabular-nums;
+}
+.gate-impact-names {
+  font-weight: 400;
+  opacity: 0.85;
 }
 .ml6 {
   margin-left: 6px;

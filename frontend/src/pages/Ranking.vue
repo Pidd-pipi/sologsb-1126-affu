@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * `/` 营位名次表 —— 按综合得分从高到低排序，展示坡度、水源距离、信号与等级，
- * 可按营地 / 地表类型 / 进出方式筛选，命中否决项的营位整行标红。
+ * 可按营地 / 地表类型 / 进出方式筛选；命中硬性门槛的营位标注卡在哪几项，
+ * 命中否决项的营位整行标红。
  * 消费 Campsite、FactorAssessment、RiskVeto；复用 <GradeBadge>、<EmptyState>。
  */
 import { computed } from 'vue'
@@ -10,7 +11,9 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { FACTOR_META } from '@/types/score'
+import { useScoringConfig } from '@/hooks/useScoringConfig'
+import { FACTOR_META, LIMIT_GATE_META } from '@/types/score'
+import type { LimitGateKey } from '@/types/score'
 import { SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import GradeBadge from '@/components/common/GradeBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -21,6 +24,8 @@ const router = useRouter()
 const siteStore = useSiteStore()
 const profileStore = useProfileStore()
 const uiStore = useUiStore()
+
+const scoring = useScoringConfig()
 
 const inputSites = computed(() =>
   siteStore.list.filter((site) => {
@@ -39,9 +44,10 @@ const inputSites = computed(() =>
 const { ranked } = useRanking({
   sites: () => inputSites.value,
   factorOf: (siteId: number) => siteStore.latestFactor(siteId),
-  weights: () => profileStore.activeWeights,
-  normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
-  thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  weights: () => scoring.weights.value,
+  normalize: () => scoring.normalize.value,
+  thresholds: () => scoring.thresholds.value,
+  gates: () => scoring.gates.value,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -55,6 +61,11 @@ function normalizedOf(
   return row.rows.find((r) => r.key === key)?.normalized ?? '—'
 }
 
+/** 某行在指定门槛上是否不达标，用于坡度 / 水源 / 信号单元格标红 */
+function isGateFail(row: { gateFails?: Array<{ key: LimitGateKey }> }, key: LimitGateKey): boolean {
+  return !!row.gateFails?.some((g) => g.key === key)
+}
+
 /** 命中否决项的营位整行标红 */
 function rowClass({ row }: { row: { vetoed: boolean } }): string {
   return row.vetoed ? 'veto-row' : ''
@@ -66,6 +77,7 @@ const stats = computed(() => {
     total: rows.length,
     gradeA: rows.filter((r) => r.grade === 'A').length,
     vetoed: rows.filter((r) => r.vetoed).length,
+    gated: rows.filter((r) => r.gateFails.length > 0).length,
     top: rows[0]?.total ?? 0,
     topName: rows[0] ? `${rows[0].site.code} ${rows[0].site.name}` : '—'
   }
@@ -74,6 +86,14 @@ const stats = computed(() => {
 const activeProfileName = computed(() => profileStore.activeProfile?.name ?? '—')
 const activeNormalize = computed(() =>
   profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—'
+)
+
+/** 当前门槛的简短摘要，展示在筛选条上方，临时调整时随动 */
+const gateSummary = computed(() =>
+  LIMIT_GATE_META.map((m) => {
+    const v = scoring.gates.value[m.key]
+    return `${m.shortLabel}${m.key === 'minSignal' ? '≥' : '≤'}${v}${m.unit}`
+  }).join(' · ')
 )
 
 function openDetail(siteId: number | undefined): void {
@@ -89,6 +109,7 @@ function openDetail(siteId: number | undefined): void {
         <h1>营位名次表</h1>
         <p>
           按当前权重方案对全部候选营位加权求和后降序排列，实时给出 A/B/C 推荐等级；
+          坡度、信号、水源任一门槛不达标最高只能评 B，两项及以上直接评 C，
           命中风险否决项的营位整行标红并自动降为 C 级。
         </p>
       </div>
@@ -108,14 +129,21 @@ function openDetail(siteId: number | undefined): void {
       <div class="stat-card">
         <div class="stat-card__label">A 级推荐</div>
         <div class="stat-card__value">{{ stats.gradeA }}</div>
-        <div class="stat-card__extra">阈值来自当前方案</div>
+        <div class="stat-card__extra">阈值与门槛来自当前方案</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__label">门槛卡限</div>
+        <div class="stat-card__value" :style="{ color: stats.gated ? '#d97706' : undefined }">
+          {{ stats.gated }}
+        </div>
+        <div class="stat-card__extra">一项最高 B · 两项直接 C</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">命中否决</div>
         <div class="stat-card__value" :style="{ color: stats.vetoed ? '#b91c1c' : undefined }">
           {{ stats.vetoed }}
         </div>
-        <div class="stat-card__extra">否决后禁止评 A</div>
+        <div class="stat-card__extra">否决后直接 C 级</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">最高综合得分</div>
@@ -128,7 +156,10 @@ function openDetail(siteId: number | undefined): void {
       <div class="panel__head">
         <h2>筛选条件</h2>
         <span class="weight-note">
-          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }}
+          当前方案：{{ activeProfileName }} · {{ activeNormalize }} · 门槛：{{ gateSummary }}
+          <el-tag v-if="uiStore.dirty" type="warning" size="small" effect="plain" class="ml6">
+            门槛 / 权重有临时调整
+          </el-tag>
         </span>
       </div>
       <div class="filters">
@@ -199,22 +230,34 @@ function openDetail(siteId: number | undefined): void {
             <el-tag size="small" effect="plain" type="info" class="ml6">{{ row.site.access }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="坡度" width="92" align="right">
+        <el-table-column label="坡度" width="104" align="right">
           <template #default="{ row }">
-            {{ row.raw.slope.toFixed(1) }}°
-            <div class="cell-sub">归一 {{ normalizedOf(row, 'slope') }}</div>
+            <span :class="{ 'gate-bad': isGateFail(row, 'maxSlope') }">
+              {{ row.raw.slope.toFixed(1) }}°
+            </span>
+            <div class="cell-sub">
+              归一 {{ normalizedOf(row, 'slope') }} · 限 {{ scoring.gates.value.maxSlope }}°
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="水源距离" width="104" align="right">
+        <el-table-column label="水源距离" width="118" align="right">
           <template #default="{ row }">
-            {{ row.raw.waterDistance }} m
-            <div class="cell-sub">归一 {{ normalizedOf(row, 'waterDistance') }}</div>
+            <span :class="{ 'gate-bad': isGateFail(row, 'maxWaterDistance') }">
+              {{ row.raw.waterDistance }} m
+            </span>
+            <div class="cell-sub">
+              归一 {{ normalizedOf(row, 'waterDistance') }} · 限 {{ scoring.gates.value.maxWaterDistance }}
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="信号" width="92" align="right">
+        <el-table-column label="信号" width="104" align="right">
           <template #default="{ row }">
-            {{ row.raw.signal }} 格
-            <div class="cell-sub">归一 {{ normalizedOf(row, 'signal') }}</div>
+            <span :class="{ 'gate-bad': isGateFail(row, 'minSignal') }">
+              {{ row.raw.signal }} 格
+            </span>
+            <div class="cell-sub">
+              归一 {{ normalizedOf(row, 'signal') }} · 限 ≥{{ scoring.gates.value.minSignal }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="风力" width="88" align="right">
@@ -231,19 +274,34 @@ function openDetail(siteId: number | undefined): void {
             <strong class="total-score">{{ formatScore(row.total) }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="等级" width="210">
+        <el-table-column label="等级 / 门槛" width="236">
           <template #default="{ row }">
             <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" />
+            <div v-if="row.gateFails.length" class="gate-tags">
+              <el-tag
+                v-for="g in row.gateFails"
+                :key="g.key"
+                :type="row.gateFails.length >= 2 ? 'danger' : 'warning'"
+                size="small"
+                effect="plain"
+                class="mr6"
+              >
+                卡{{ g.label }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="否决项" min-width="180">
+        <el-table-column label="否决 / 门槛说明" min-width="220">
           <template #default="{ row }">
             <template v-if="row.vetoed">
               <el-tag v-for="v in uiStore.vetosOf(row.siteId)" :key="v.id" type="danger" size="small" class="mr6">
                 {{ v.type }}
               </el-tag>
             </template>
-            <span v-else class="muted">无</span>
+            <div v-if="row.gateFails.length" class="gate-reasons">
+              <span v-for="g in row.gateFails" :key="g.key" class="gate-reasons__item">⚠ {{ g.reason }}</span>
+            </div>
+            <span v-if="!row.vetoed && !row.gateFails.length" class="muted">全部达标</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="132" fixed="right">
@@ -300,6 +358,26 @@ function openDetail(siteId: number | undefined): void {
   font-size: 15px;
   color: var(--gb-accent-strong);
   font-variant-numeric: tabular-nums;
+}
+.gate-bad {
+  color: #b91c1c;
+  font-weight: 700;
+}
+.gate-tags {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.gate-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gate-reasons__item {
+  font-size: 11px;
+  color: #b45309;
+  line-height: 1.4;
 }
 .ml6 {
   margin-left: 6px;

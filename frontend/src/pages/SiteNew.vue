@@ -20,6 +20,7 @@ import type { FactorKey, FactorWeights } from '@/types/score'
 import {
   buildFactorRows,
   buildNormalizedMatrix,
+  evaluateGates,
   gradeOf,
   rawValuesOf,
   weightedTotal,
@@ -228,11 +229,16 @@ const previewTotal = computed(() =>
   weightedTotal(previewNormalized.value, previewWeights.value)
 )
 
+const previewGateFails = computed(() =>
+  evaluateGates(previewRaw.value, profileStore.activeProfile?.limits)
+)
+
 const previewGrade = computed<Grade>(() =>
   gradeOf(
     previewTotal.value,
     profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-    false
+    false,
+    previewGateFails.value
   )
 )
 
@@ -557,6 +563,19 @@ async function submit(): Promise<void> {
         <strong>{{ previewTotal }}</strong>
         <span class="muted">预估等级 {{ previewGrade }}</span>
       </div>
+      <div v-if="previewGateFails.length" class="preview-gates">
+        <el-tag
+          v-for="g in previewGateFails"
+          :key="g.key"
+          :type="previewGateFails.length >= 2 ? 'danger' : 'warning'"
+          size="small"
+        >
+          ⚠ {{ g.reason }}
+        </el-tag>
+        <span class="weight-note">
+          {{ previewGateFails.length >= 2 ? '两项及以上不达标，保存后直接评 C' : '一项不达标，保存后最高只能评 B' }}
+        </span>
+      </div>
       <div class="factor-grid">
         <FactorScoreBar
           v-for="row in previewRows"
@@ -603,5 +622,12 @@ async function submit(): Promise<void> {
 }
 .draft-state {
   margin-left: 12px;
+}
+.preview-gates {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 </style>
